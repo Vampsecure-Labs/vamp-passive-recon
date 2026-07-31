@@ -1,41 +1,51 @@
 #!/usr/bin/env python3
 """
-vamp_passive_recon.py — VampSecure Labs · Passive Recon v2.0
-=============================================================
-Motor de reconocimiento pasivo para mapeo de subdominios y análisis de
-cabeceras HTTP. Todas las consultas se realizan contra fuentes públicas
-de terceros; NO se envía tráfico al dominio objetivo.
+vamp_passive_recon.py — Motor de Reconocimiento Pasivo de Subdominios
+======================================================================
+VampSecure Labs · VampSecure Studios
+Para Uso Exclusivo en Pruebas de Penetración Autorizadas — v2.0
 
-Fuentes consultadas
+DESCRIPCIÓN GENERAL
 -------------------
-  · Certificate Transparency (crt.sh)
-  · AlienVault OTX Passive DNS
-  · HackerTarget hostsearch
-  · Internet Archive (Wayback Machine)
-  · AnubisDB (jldc.me)
-  · urlscan.io
+Motor de reconocimiento pasivo para mapeo de subdominios y análisis de
+cabeceras HTTP de un dominio objetivo. Todas las consultas se realizan
+exclusivamente contra fuentes públicas de terceros; en ningún caso se envía
+tráfico directamente al dominio objetivo, lo que garantiza sigilo total
+durante la fase de reconocimiento.
 
-Cambios v2.0 respecto a v1.0
------------------------------
-  · Validación de scope: --allowed-domains permite restringir a dominios
-    autorizados (evita reconocimiento accidental fuera del scope)
-  · User-Agent actualizado a VampSecureLabs-PassiveRecon/2.0
-  · HTML report: dark-theme cyberpunk alineado con suite VampSecure Labs
-  · Autoría: VampSecure Studios (VampSecure Labs Security Research Division)
-  · Docstrings completas en español
+La validación de scope (--allowed-domains) impide reconocimiento accidental
+fuera del perímetro autorizado, convirtiendo la herramienta en adecuada para
+entornos donde el contrato de auditoría delimita con precisión los dominios
+en scope. El resultado se presenta en consola enriquecida (Rich), informe
+HTML standalone dark-theme cyberpunk y exportación JSON completa.
 
-Uso
----
-  python vamp_passive_recon.py -d ejemplo.com
-  python vamp_passive_recon.py -d ejemplo.com --headers --max-hosts 20
-  python vamp_passive_recon.py -d ejemplo.com --json out.json --html out.html
-  python vamp_passive_recon.py -d sub.ejemplo.com --allowed-domains ejemplo.com
+ARQUITECTURA DE EJECUCIÓN (2 fases)
+------------------------------------
+  Fase 1 — Enumeración de subdominios (SubdomainEnumerator — sources.py)
+    Consulta simultánea a 6 fuentes públicas mediante AsyncIO + aiohttp:
+    · Certificate Transparency (crt.sh) — certificados TLS emitidos
+    · AlienVault OTX Passive DNS        — registros DNS históricos
+    · HackerTarget hostsearch           — búsqueda de hosts por dominio
+    · Internet Archive (Wayback Machine)— URLs históricas capturadas
+    · AnubisDB (jldc.me)                — DNS pasivo alternativo
+    · urlscan.io                        — resultados de escaneos públicos
+    Validación de scope: cada subdominio encontrado se verifica contra
+    --allowed-domains antes de incluirlo en el resultado.
 
-Dependencias: aiohttp, rich
-Variables de entorno: OTX_API_KEY (opcional, aumenta rate limit de OTX)
+  Fase 2 — Análisis de cabeceras HTTP (HeaderAnalyzer — headers.py)
+    Solo si --headers. Envía una petición HEAD a cada subdominio confirmado
+    y audita las cabeceras de seguridad (HSTS, CSP, X-Frame-Options,
+    X-Content-Type-Options, Referrer-Policy, Permissions-Policy).
 
-© VampSecure Studios — VampSecure Labs Security Research Division
-Uso exclusivo en entornos autorizados. Ver LICENSE.
+DEPENDENCIAS
+------------
+  aiohttp  >= 3.9.0   — Cliente HTTP asíncrono con soporte SSL opcional
+  rich     >= 13.7.0  — Salida de consola con formato enriquecido y tablas
+
+AUTORÍA
+-------
+  © VampSecure Studios — VampSecure Labs Security Research Division
+  Todos los derechos reservados. Uso exclusivo en entornos autorizados.
 """
 
 from __future__ import annotations
@@ -58,13 +68,14 @@ VERSION = "2.0"
 TOOL_NAME = "vamp-passive-recon"
 
 BANNER = r"""
- ██╗   ██╗ █████╗ ███╗   ███╗██████╗ ███████╗███████╗ ██████╗
- ██║   ██║██╔══██╗████╗ ████║██╔══██╗██╔════╝██╔════╝██╔════╝
- ██║   ██║███████║██╔████╔██║██████╔╝███████╗█████╗  ██║
- ╚██╗ ██╔╝██╔══██║██║╚██╔╝██║██╔═══╝ ╚════██║██╔══╝  ██║
-  ╚████╔╝ ██║  ██║██║ ╚═╝ ██║██║     ███████║███████╗╚██████╗
-   ╚═══╝  ╚═╝  ╚═╝╚═╝     ╚═╝╚═╝     ╚══════╝╚══════╝ ╚═════╝
-   [PASSIVE-RECON v{version}] by VampSecure Labs
+  ____   ____    _    __  __ ____  _____ ____ _   _ ____  _____   _        _    ____ ____
+ \ \ / / _  |  / \  |  \/  |  _ \/ ____/ ___| | | |  _ \| ____| | |      / \  | __ ) ___|
+  \ V / (_| | / _ \ | |\/| | |_) \___ \| |___| | | | |_) |  _|   | |     / _ \ |  _ \___ \
+   | |  \__, |/ ___ \| |  | |  __/ ___) |___  | |_| |  _ <| |___  | |___ / ___ \| |_) |__) |
+   |_|     /_/_/   \_|_|  |_|_|   |____/\____|\___/|_| \_|_____| |_____/_/   \_|____/____/
+    by VampSecure Studios · vamp-passive-recon v2.0 · Passive Subdomain Recon & Header Auditor
+    ─────────────────────────────────────────────────────────────────────────────────────────
+    USO EXCLUSIVO EN AUDITORÍAS AUTORIZADAS · El uso no autorizado es ilegal
 """
 
 
