@@ -1,0 +1,16 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+scope.txt
+scope-*.txt
+report_*.json
+report_*.html
+*.log
+.DS_Store
+.env
+!.env.example
+*.key
+*.pem
+
