@@ -161,7 +161,6 @@ async def run(args: argparse.Namespace) -> int:
     reporter = Reporter(console)
 
     if not args.quiet:
-        console.print(BANNER.format(version=VERSION), style="bold cyan")
         console.print(Panel.fit(
             f"Objetivo: [bold]{args.domain}[/]\n"
             f"Modo: pasivo (sin tráfico al target)\n"
@@ -238,6 +237,9 @@ async def run(args: argparse.Namespace) -> int:
 
 def main() -> None:
     """Punto de entrada principal."""
+    console_root = Console()
+    console_root.print(BANNER.format(version=VERSION), style="bold cyan")
+
     args = parse_args()
     try:
         exit_code = asyncio.run(run(args))
