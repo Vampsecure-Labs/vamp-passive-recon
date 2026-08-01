@@ -64,8 +64,10 @@ from headers import HeaderAnalyzer
 from reporter import Reporter
 
 
-VERSION = "2.0"
+VERSION   = "2.0"
 TOOL_NAME = "vamp-passive-recon"
+
+console = Console()
 
 BANNER = r"""
   ____   ____    _    __  __ ____  _____ ____ _   _ ____  _____   _        _    ____ ____
@@ -237,8 +239,7 @@ async def run(args: argparse.Namespace) -> int:
 
 def main() -> None:
     """Punto de entrada principal."""
-    console_root = Console()
-    console_root.print(BANNER.format(version=VERSION), style="bold cyan")
+    console.print(BANNER.format(version=VERSION), style="bold cyan")
 
     args = parse_args()
     try:
