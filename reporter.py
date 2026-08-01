@@ -10,13 +10,14 @@ import json
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.tree import Tree
 
+from asm import ASMResult, GitHubFinding
 from headers import HeaderReport
 from sources import SourceResult
 
@@ -90,6 +91,104 @@ class Reporter:
                 self.console.print(t)
 
     # ------------------------------------------------------------------
+    # ASM — consola
+    # ------------------------------------------------------------------
+
+    def print_asm_results(self, asm: ASMResult) -> None:
+        """Muestra resultados del módulo ASM en consola con formato Rich."""
+        from rich.rule import Rule
+        from rich.panel import Panel as RichPanel
+
+        self.console.print(Rule("[bold red]ASM — Análisis de Superficie de Ataque[/]"))
+
+        # Tech stack
+        if asm.tech_stack:
+            t = Table(title="Stack tecnológico detectado (pasivo)", show_lines=False)
+            t.add_column("Tecnología",  style="cyan")
+            t.add_column("Versión",     width=12)
+            t.add_column("Confianza",   width=10)
+            t.add_column("Fuente",      width=30, style="dim")
+            for tech in asm.tech_stack:
+                conf_style = {"HIGH": "bold green", "MEDIUM": "yellow", "LOW": "dim"}.get(
+                    tech.confidence, "white"
+                )
+                t.add_row(
+                    tech.name,
+                    tech.version or "—",
+                    f"[{conf_style}]{tech.confidence}[/]",
+                    tech.source,
+                )
+            self.console.print(t)
+        else:
+            self.console.print("[dim]Tech fingerprinting: sin resultados.[/]")
+
+        # Cert history
+        self.console.print()
+        if asm.cert_history:
+            t = Table(title=f"Historial de certificados TLS ({len(asm.cert_history)} entradas)", show_lines=False)
+            t.add_column("CN",             style="cyan", width=30)
+            t.add_column("Emisor",         width=30)
+            t.add_column("Válido desde",   width=12)
+            t.add_column("Hasta",          width=12)
+            t.add_column("Flags",          width=20)
+            for cert in asm.cert_history[:15]:
+                flags = []
+                if cert.is_wildcard:
+                    flags.append("[yellow]wildcard[/]")
+                if cert.is_expired:
+                    flags.append("[red]expirado[/]")
+                if cert.is_unusual_issuer:
+                    flags.append("[bold red]emisor raro[/]")
+                if cert.san_count > 10:
+                    flags.append(f"[dim]{cert.san_count} SANs[/]")
+                flags_str = " ".join(flags) or "[green]OK[/]"
+                t.add_row(
+                    cert.cn[:28], cert.issuer[:28],
+                    cert.not_before, cert.not_after, flags_str,
+                )
+            self.console.print(t)
+
+            wildcards    = sum(1 for c in asm.cert_history if c.is_wildcard)
+            expired      = sum(1 for c in asm.cert_history if c.is_expired)
+            unusual      = sum(1 for c in asm.cert_history if c.is_unusual_issuer)
+            if wildcards or expired or unusual:
+                self.console.print(
+                    f"  [yellow]Resumen:[/] {wildcards} wildcards · "
+                    f"{expired} expirados · {unusual} emisores inusuales"
+                )
+        else:
+            self.console.print("[dim]Historial de certificados: sin datos.[/]")
+
+        # GitHub findings
+        self.console.print()
+        if not asm.github_enabled:
+            self.console.print(
+                "[dim]GitHub dorks: desactivado (sin GITHUB_TOKEN). "
+                "Exporta GITHUB_TOKEN para activar.[/]"
+            )
+        elif asm.github_findings:
+            self.console.print(
+                f"[bold red]⚠ GitHub: {len(asm.github_findings)} posibles exposiciones[/]"
+            )
+            for f in asm.github_findings:
+                self.console.print(
+                    f"  · [cyan]{f.repo_full_name}[/] — {f.file_path}\n"
+                    f"    Dork: [dim]{f.dork}[/]\n"
+                    f"    URL: {f.html_url}"
+                )
+                if f.excerpt:
+                    self.console.print(
+                        f"    Fragmento: [dim]{f.excerpt[:100]}…[/]"
+                    )
+        else:
+            self.console.print("[green]GitHub dorks: sin exposiciones detectadas.[/]")
+
+        # Errores ASM
+        if asm.errors:
+            for err in asm.errors:
+                self.console.print(f"[yellow]  ASM warning: {err}[/]")
+
+    # ------------------------------------------------------------------
     # JSON
     # ------------------------------------------------------------------
 
@@ -99,6 +198,7 @@ class Reporter:
         subdomains: Set[str],
         source_results: List[SourceResult],
         header_reports: Dict[str, List[HeaderReport]],
+        asm: Optional["ASMResult"] = None,
     ) -> str:
         payload = {
             "generated_at": datetime.utcnow().isoformat() + "Z",
@@ -123,6 +223,14 @@ class Reporter:
                 for host, reps in header_reports.items()
             },
         }
+        if asm:
+            payload["asm"] = {
+                "tech_stack": [asdict(t) for t in asm.tech_stack],
+                "cert_history": [asdict(c) for c in asm.cert_history],
+                "github_findings": [asdict(g) for g in asm.github_findings],
+                "github_enabled": asm.github_enabled,
+                "errors": asm.errors,
+            }
         return json.dumps(payload, indent=2, ensure_ascii=False)
 
     # ------------------------------------------------------------------
@@ -135,6 +243,7 @@ class Reporter:
         subdomains: Set[str],
         source_results: List[SourceResult],
         header_reports: Dict[str, List[HeaderReport]],
+        asm: Optional["ASMResult"] = None,
     ) -> str:
         severity_color = {
             "info":   "#4A90E2",
@@ -203,6 +312,86 @@ class Reporter:
 
         headers_html = "".join(header_sections) or "<p>Sin datos públicos de cabeceras.</p>"
 
+        # Sección ASM
+        asm_html = ""
+        if asm:
+            # Tech stack
+            if asm.tech_stack:
+                tech_rows = "".join(
+                    f"<tr><td>{esc(t.name)}</td><td>{esc(t.version or '—')}</td>"
+                    f"<td>{esc(t.confidence)}</td><td>{esc(t.source)}</td></tr>"
+                    for t in asm.tech_stack
+                )
+                tech_section = (
+                    "<h2>ASM — Stack tecnológico</h2>"
+                    "<table><thead><tr><th>Tecnología</th><th>Versión</th>"
+                    "<th>Confianza</th><th>Fuente</th></tr></thead>"
+                    f"<tbody>{tech_rows}</tbody></table>"
+                )
+            else:
+                tech_section = "<h2>ASM — Stack tecnológico</h2><p>Sin datos.</p>"
+
+            # Cert history
+            if asm.cert_history:
+                cert_rows = ""
+                for cert in asm.cert_history[:20]:
+                    flags = []
+                    if cert.is_wildcard:     flags.append("<span class='flag-warn'>wildcard</span>")
+                    if cert.is_expired:      flags.append("<span class='flag-err'>expirado</span>")
+                    if cert.is_unusual_issuer: flags.append("<span class='flag-err'>emisor raro</span>")
+                    flags_html = " ".join(flags) or "<span style='color:#4caf50'>OK</span>"
+                    cert_rows += (
+                        f"<tr><td><code>{esc(cert.cn)}</code></td>"
+                        f"<td>{esc(cert.issuer[:40])}</td>"
+                        f"<td>{esc(cert.not_before)}</td>"
+                        f"<td>{esc(cert.not_after)}</td>"
+                        f"<td>{cert.san_count}</td>"
+                        f"<td>{flags_html}</td></tr>"
+                    )
+                cert_section = (
+                    f"<h2>ASM — Historial de certificados ({len(asm.cert_history)} entradas)</h2>"
+                    "<table><thead><tr><th>CN</th><th>Emisor</th>"
+                    "<th>Desde</th><th>Hasta</th><th>SANs</th><th>Flags</th></tr></thead>"
+                    f"<tbody>{cert_rows}</tbody></table>"
+                )
+            else:
+                cert_section = "<h2>ASM — Historial de certificados</h2><p>Sin datos.</p>"
+
+            # GitHub findings
+            if not asm.github_enabled:
+                gh_section = (
+                    "<h2>ASM — GitHub Dorks</h2>"
+                    "<p class='meta'>Desactivado: exporta GITHUB_TOKEN para activar.</p>"
+                )
+            elif asm.github_findings:
+                gh_items = "".join(
+                    f"<div class='gh-finding'>"
+                    f"<p><b>{esc(f.repo_full_name)}</b> — <code>{esc(f.file_path)}</code></p>"
+                    f"<p class='meta'>Dork: {esc(f.dork)}</p>"
+                    f"<p><a href='{esc(f.html_url)}' target='_blank'>{esc(f.html_url)}</a></p>"
+                    + (f"<pre class='excerpt'>{esc(f.excerpt[:200])}</pre>" if f.excerpt else "")
+                    + "</div>"
+                    for f in asm.github_findings
+                )
+                gh_section = (
+                    f"<h2 style='color:#ff4444'>⚠ ASM — GitHub: "
+                    f"{len(asm.github_findings)} posibles exposiciones</h2>"
+                    f"{gh_items}"
+                )
+            else:
+                gh_section = (
+                    "<h2>ASM — GitHub Dorks</h2>"
+                    "<p class='ok'>Sin exposiciones detectadas.</p>"
+                )
+
+            asm_html = (
+                f"<div class='asm-section'>"
+                f"{tech_section}"
+                f"{cert_section}"
+                f"{gh_section}"
+                f"</div>"
+            )
+
         return f"""<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -242,11 +431,19 @@ class Reporter:
   .sev-medium{{color:#f0c040;font-weight:700;}}
   .sev-low{{color:#4caf50;}}
   .sev-info{{color:#4a90e2;}}
+  .asm-section{{margin-top:2rem;border-top:2px solid #b00020;padding-top:1rem;}}
+  .gh-finding{{background:#0d0d0d;padding:.75rem 1rem;margin:.5rem 0;
+               border-left:3px solid #ff4444;border-radius:4px;}}
+  .gh-finding a{{color:#9ecbff;font-size:.85rem;}}
+  .excerpt{{background:#111;padding:.5rem;border-radius:4px;color:#ccc;
+            font-size:.8rem;overflow-x:auto;margin-top:.4rem;}}
+  .flag-warn{{background:#3a2a00;color:#f0c040;padding:.1rem .4rem;border-radius:3px;font-size:.78rem;}}
+  .flag-err{{background:#2a0000;color:#ff4444;padding:.1rem .4rem;border-radius:3px;font-size:.78rem;}}
 </style>
 </head>
 <body>
   <header>
-    <div class="brand">VampSecure Labs — Passive Recon v2.0</div>
+    <div class="brand">VampSecure Labs — Passive Recon v3.0 ASM</div>
     <p class="meta-bar">Target: <b>{esc(domain)}</b> · Generado: {ts} · Modo: pasivo (sin tráfico al objetivo)</p>
   </header>
 
@@ -260,9 +457,11 @@ class Reporter:
   <h2>Análisis de cabeceras</h2>
   {headers_html}
 
+  {asm_html}
+
   <footer>
     VampSecure Labs by VampSecure Studios · Uso exclusivo en entornos autorizados ·
-    Datos: crt.sh · AlienVault OTX · HackerTarget · Wayback Machine · AnubisDB · urlscan.io
+    Datos: crt.sh · AlienVault OTX · HackerTarget · Wayback Machine · AnubisDB · urlscan.io · RapidDNS · BufferOver
   </footer>
 </body>
 </html>

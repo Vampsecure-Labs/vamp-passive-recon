@@ -20,7 +20,7 @@ from urllib.parse import quote_plus
 
 import aiohttp
 
-USER_AGENT = "VampSecureLabs-PassiveRecon/2.0 (+https://vampsecurestudios.com)"
+USER_AGENT = "VampSecureLabs-PassiveRecon/3.0 (+https://vampsecurestudios.com)"
 DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=30)
 
 # Códigos que merece la pena reintentar (rate limit o fallos transitorios)
@@ -279,6 +279,63 @@ class UrlScan(PassiveSource):
         return result
 
 
+class RapidDNS(PassiveSource):
+    """
+    RapidDNS — agregador de DNS pasivo con cobertura amplia.
+    No requiere API key. Velocidad moderada.
+    """
+    name = "RapidDNS"
+
+    async def fetch(self, session: aiohttp.ClientSession, domain: str) -> SourceResult:
+        result = SourceResult(self.name)
+        url = f"https://rapiddns.io/subdomain/{quote_plus(domain)}?full=1&down=1"
+        try:
+            async with session.get(url, timeout=DEFAULT_TIMEOUT) as r:
+                if r.status != 200:
+                    result.error = f"HTTP {r.status}"
+                    return result
+                body = await r.text()
+                # RapidDNS devuelve líneas "subdominio\tIP" en modo down=1
+                for line in body.splitlines():
+                    host = line.split("\t", 1)[0].strip()
+                    cleaned = _clean(host, domain)
+                    if cleaned:
+                        result.subdomains.add(cleaned)
+        except Exception as e:
+            result.error = f"{type(e).__name__}: {e}"
+        return result
+
+
+class BufferOver(PassiveSource):
+    """
+    BufferOver DNS — fuente pasiva adicional basada en datos de resolución DNS masiva.
+    API pública, sin autenticación.
+    """
+    name = "BufferOver"
+
+    async def fetch(self, session: aiohttp.ClientSession, domain: str) -> SourceResult:
+        result = SourceResult(self.name)
+        url = f"https://dns.bufferover.run/dns?q=.{quote_plus(domain)}"
+        try:
+            async with session.get(url, timeout=DEFAULT_TIMEOUT) as r:
+                if r.status != 200:
+                    result.error = f"HTTP {r.status}"
+                    return result
+                data = await r.json(content_type=None)
+                # Combina FDNS_A y RDNS (ambos con formato "IP,hostname")
+                for entry_list_key in ("FDNS_A", "RDNS"):
+                    for entry in data.get(entry_list_key) or []:
+                        parts = str(entry).split(",", 1)
+                        if len(parts) == 2:
+                            host = parts[1].strip().rstrip(".")
+                            cleaned = _clean(host, domain)
+                            if cleaned:
+                                result.subdomains.add(cleaned)
+        except Exception as e:
+            result.error = f"{type(e).__name__}: {e}"
+        return result
+
+
 # ---------------------------------------------------------------------------
 # Orquestador
 # ---------------------------------------------------------------------------
@@ -290,6 +347,8 @@ DEFAULT_SOURCES: list[type[PassiveSource]] = [
     WaybackMachine,
     AnubisDB,
     UrlScan,
+    RapidDNS,
+    BufferOver,
 ]
 
 

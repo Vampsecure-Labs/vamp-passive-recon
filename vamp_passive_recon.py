@@ -1,46 +1,52 @@
 #!/usr/bin/env python3
 """
-vamp_passive_recon.py — Motor de Reconocimiento Pasivo de Subdominios
-======================================================================
+vamp_passive_recon.py — Motor de Reconocimiento Pasivo y ASM
+=============================================================
 VampSecure Labs · VampSecure Studios
-Para Uso Exclusivo en Pruebas de Penetración Autorizadas — v2.0
+Para Uso Exclusivo en Pruebas de Penetración Autorizadas — v3.0
 
 DESCRIPCIÓN GENERAL
 -------------------
-Motor de reconocimiento pasivo para mapeo de subdominios y análisis de
-cabeceras HTTP de un dominio objetivo. Todas las consultas se realizan
-exclusivamente contra fuentes públicas de terceros; en ningún caso se envía
-tráfico directamente al dominio objetivo, lo que garantiza sigilo total
-durante la fase de reconocimiento.
+Motor de reconocimiento pasivo para mapeo de subdominios, análisis de
+cabeceras HTTP y gestión de superficie de ataque (ASM). Todas las consultas
+se realizan exclusivamente contra fuentes públicas de terceros; en ningún
+caso se envía tráfico directamente al dominio objetivo.
 
 La validación de scope (--allowed-domains) impide reconocimiento accidental
-fuera del perímetro autorizado, convirtiendo la herramienta en adecuada para
-entornos donde el contrato de auditoría delimita con precisión los dominios
-en scope. El resultado se presenta en consola enriquecida (Rich), informe
-HTML standalone dark-theme cyberpunk y exportación JSON completa.
+fuera del perímetro autorizado. El resultado se presenta en consola enriquecida
+(Rich), informe HTML standalone dark-theme y exportación JSON completa.
 
-ARQUITECTURA DE EJECUCIÓN (2 fases)
-------------------------------------
+ARQUITECTURA DE EJECUCIÓN (3 fases)
+-------------------------------------
   Fase 1 — Enumeración de subdominios (SubdomainEnumerator — sources.py)
-    Consulta simultánea a 6 fuentes públicas mediante AsyncIO + aiohttp:
+    Consulta simultánea a 8 fuentes públicas mediante AsyncIO + aiohttp:
     · Certificate Transparency (crt.sh) — certificados TLS emitidos
     · AlienVault OTX Passive DNS        — registros DNS históricos
     · HackerTarget hostsearch           — búsqueda de hosts por dominio
     · Internet Archive (Wayback Machine)— URLs históricas capturadas
     · AnubisDB (jldc.me)                — DNS pasivo alternativo
     · urlscan.io                        — resultados de escaneos públicos
-    Validación de scope: cada subdominio encontrado se verifica contra
-    --allowed-domains antes de incluirlo en el resultado.
+    · RapidDNS                          — v3.0: agregador DNS adicional
+    · BufferOver                        — v3.0: datos DNS masivos (FDNS/RDNS)
 
   Fase 2 — Análisis de cabeceras HTTP (HeaderAnalyzer — headers.py)
-    Solo si --headers. Envía una petición HEAD a cada subdominio confirmado
-    y audita las cabeceras de seguridad (HSTS, CSP, X-Frame-Options,
-    X-Content-Type-Options, Referrer-Policy, Permissions-Policy).
+    Solo si no --no-headers. Petición HEAD a cada subdominio para auditar
+    cabeceras de seguridad (HSTS, CSP, X-Frame-Options, etc.).
+
+  Fase 3 — ASM (Attack Surface Management — asm.py) [v3.0]
+    · Tech Fingerprinting: urlscan.io technologies + regex en cabeceras HTTP
+    · GitHub Dorks: búsqueda de .env/configs/claves expuestas (GITHUB_TOKEN)
+    · Cert History: análisis de historial completo crt.sh (wildcards/expirados)
 
 DEPENDENCIAS
 ------------
   aiohttp  >= 3.9.0   — Cliente HTTP asíncrono con soporte SSL opcional
   rich     >= 13.7.0  — Salida de consola con formato enriquecido y tablas
+
+VARIABLES DE ENTORNO OPCIONALES
+--------------------------------
+  OTX_API_KEY    — Sube límite OTX de 10 a 1000 req/min
+  GITHUB_TOKEN   — Activa GitHub Dorks (sin token: desactivado)
 
 AUTORÍA
 -------
@@ -59,12 +65,13 @@ from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 
+from asm import ASMAnalyzer
 from sources import SubdomainEnumerator
 from headers import HeaderAnalyzer
 from reporter import Reporter
 
 
-VERSION   = "2.0"
+VERSION   = "3.0"
 TOOL_NAME = "vamp-passive-recon"
 
 console = Console()
@@ -75,8 +82,8 @@ BANNER = r"""
   \ V / (_| | / _ \ | |\/| | |_) \___ \| |___| | | | |_) |  _|   | |     / _ \ |  _ \___ \
    | |  \__, |/ ___ \| |  | |  __/ ___) |___  | |_| |  _ <| |___  | |___ / ___ \| |_) |__) |
    |_|     /_/_/   \_|_|  |_|_|   |____/\____|\___/|_| \_|_____| |_____/_/   \_|____/____/
-     by VampSecure Studios · vamp-passive-recon v2.0 · Passive Subdomain Recon & Header Auditor
-     ────────────────────────────────────────────────────────────────────────────────────────────
+     by VampSecure Studios · vamp-passive-recon v3.0 · Passive Recon + ASM Engine
+     ────────────────────────────────────────────────────────────────────────────
      USO EXCLUSIVO EN AUDITORÍAS AUTORIZADAS · El uso no autorizado es ilegal
 """
 
@@ -128,13 +135,17 @@ def parse_args() -> argparse.Namespace:
     """Parsea argumentos de línea de comandos."""
     p = argparse.ArgumentParser(
         prog=TOOL_NAME,
-        description=f"VampSecure Labs Passive Recon v{VERSION} — Reconocimiento pasivo de subdominios y cabeceras",
+        description=(
+            f"VampSecure Labs Passive Recon v{VERSION} — "
+            "Reconocimiento pasivo + ASM (8 fuentes · tech fingerprint · GitHub dorks · cert history)"
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Ejemplos:
-  vamp-passive-recon -d ejemplo.com
-  vamp-passive-recon -d ejemplo.com --headers --max-hosts 20
-  vamp-passive-recon -d ejemplo.com --json salida.json --html salida.html
-  vamp-passive-recon -d sub.ejemplo.com --allowed-domains ejemplo.com,otro.com
+  %(prog)s -d ejemplo.com
+  %(prog)s -d ejemplo.com --no-asm --max-hosts 20
+  %(prog)s -d ejemplo.com --json salida.json --html salida.html
+  %(prog)s -d sub.ejemplo.com --allowed-domains ejemplo.com,otro.com
+  GITHUB_TOKEN=ghp_xxx %(prog)s -d ejemplo.com   # activa GitHub dorks
         """,
     )
     p.add_argument("-d", "--domain", required=True, help="Dominio raíz objetivo")
@@ -142,6 +153,8 @@ def parse_args() -> argparse.Namespace:
                    help="Lista de dominios autorizados separados por coma (scope)")
     p.add_argument("--no-headers", action="store_true",
                    help="Omitir fase de análisis de cabeceras HTTP")
+    p.add_argument("--no-asm", action="store_true",
+                   help="Omitir fase ASM (tech fingerprint, GitHub dorks, cert history)")
     p.add_argument("--max-hosts", type=int, default=15,
                    help="Máximo de hosts a analizar para cabeceras (default: 15)")
     p.add_argument("--concurrency", type=int, default=5,
@@ -158,23 +171,25 @@ def parse_args() -> argparse.Namespace:
 
 
 async def run(args: argparse.Namespace) -> int:
-    """Orquesta las fases de reconocimiento pasivo."""
-    console = Console()
-    reporter = Reporter(console)
+    """Orquesta las tres fases de reconocimiento pasivo y ASM."""
+    console_local = Console()
+    reporter = Reporter(console_local)
 
     if not args.quiet:
-        console.print(Panel.fit(
+        console_local.print(Panel.fit(
             f"Objetivo: [bold]{args.domain}[/]\n"
-            f"Modo: pasivo (sin tráfico al target)\n"
+            f"Modo: pasivo (sin tráfico al target) · Fuentes: 8\n"
+            f"ASM: {'desactivado (--no-asm)' if args.no_asm else 'activo'} · "
+            f"GitHub Dorks: {'activo (GITHUB_TOKEN)' if os.environ.get('GITHUB_TOKEN') else 'desactivado (sin GITHUB_TOKEN)'}\n"
             f"Versión: {VERSION}",
-            title="[bold cyan]VampSecure Labs — Passive Recon[/]",
+            title="[bold cyan]VampSecure Labs — Passive Recon + ASM[/]",
             border_style="cyan",
         ))
 
     # Validación de scope
     allowed = [d.strip() for d in args.allowed_domains.split(",")] if args.allowed_domains else []
     if not _validate_scope(args.domain, allowed):
-        console.print(
+        console_local.print(
             f"[bold red]ERROR DE SCOPE:[/] '{args.domain}' no está en la lista de dominios "
             f"autorizados: {', '.join(allowed)}\n"
             "Añade el dominio a --allowed-domains si es un objetivo autorizado."
@@ -182,32 +197,36 @@ async def run(args: argparse.Namespace) -> int:
         return 1
 
     if allowed:
-        console.print(f"[green]✔ Scope validado:[/] {args.domain} ∈ {{{', '.join(allowed)}}}\n")
+        console_local.print(f"[green]✔ Scope validado:[/] {args.domain} ∈ {{{', '.join(allowed)}}}\n")
 
-    # Fase 1: Enumeración de subdominios
-    console.print("\n[bold]>> Fase 1: enumeración pasiva de subdominios[/]\n")
+    # ── Fase 1: Enumeración de subdominios ───────────────────────────────────
+    console_local.print("\n[bold]>> Fase 1: enumeración pasiva de subdominios (8 fuentes)[/]\n")
     enumerator = SubdomainEnumerator()
-    with console.status("[cyan]Consultando fuentes públicas (crt.sh, OTX, HackerTarget…)[/]", spinner="dots"):
+    with console_local.status(
+        "[cyan]Consultando fuentes: crt.sh · OTX · HackerTarget · Wayback · "
+        "AnubisDB · urlscan · RapidDNS · BufferOver…[/]",
+        spinner="dots",
+    ):
         subs, src_results = await enumerator.enumerate(args.domain)
 
     reporter.print_source_summary(src_results)
-    console.print()
+    console_local.print()
     if subs:
         reporter.print_subdomains(args.domain, subs)
     else:
-        console.print("[yellow]No se descubrieron subdominios.[/]")
+        console_local.print("[yellow]No se descubrieron subdominios.[/]")
 
-    # Fase 2: Análisis de cabeceras HTTP
+    # ── Fase 2: Análisis de cabeceras HTTP ───────────────────────────────────
     header_reports = {}
     if not args.no_headers and subs:
-        console.print("\n[bold]>> Fase 2: análisis pasivo de cabeceras HTTP[/]\n")
+        console_local.print("\n[bold]>> Fase 2: análisis de cabeceras HTTP[/]\n")
         hosts = sorted(subs)
         if args.domain not in hosts:
             hosts = [args.domain] + hosts
         hosts = hosts[: args.max_hosts]
 
         analyzer = HeaderAnalyzer()
-        with console.status(f"[cyan]Recolectando cabeceras de {len(hosts)} hosts…[/]"):
+        with console_local.status(f"[cyan]Recolectando cabeceras de {len(hosts)} hosts…[/]"):
             header_reports = await analyzer.analyze_hosts(
                 hosts,
                 max_per_host=1,
@@ -215,24 +234,44 @@ async def run(args: argparse.Namespace) -> int:
             )
         reporter.print_header_findings(header_reports)
 
-    # Salidas a fichero
+    # ── Fase 3: ASM ──────────────────────────────────────────────────────────
+    asm_result = None
+    if not args.no_asm:
+        console_local.print("\n[bold]>> Fase 3: ASM — Attack Surface Management[/]\n")
+
+        # Construir dict plano {host: headers_dict} para fingerprinting de tech
+        flat_headers: dict = {}
+        for host, reps in header_reports.items():
+            for rep in reps:
+                if rep.headers:
+                    flat_headers[host] = rep.headers
+                    break
+
+        github_token = os.environ.get("GITHUB_TOKEN")
+        asm_analyzer = ASMAnalyzer(github_token=github_token)
+        with console_local.status("[cyan]ASM: fingerprinting · cert history · GitHub dorks…[/]"):
+            asm_result = await asm_analyzer.analyze(args.domain, flat_headers)
+
+        reporter.print_asm_results(asm_result)
+
+    # ── Salidas a fichero ─────────────────────────────────────────────────────
     if args.subs_out:
         Path(args.subs_out).write_text("\n".join(sorted(subs)) + "\n", encoding="utf-8")
-        console.print(f"\n[green]✔[/] Subdominios guardados en {args.subs_out}")
+        console_local.print(f"\n[green]✔[/] Subdominios guardados en {args.subs_out}")
 
     if args.json:
         Path(args.json).write_text(
-            reporter.to_json(args.domain, subs, src_results, header_reports),
+            reporter.to_json(args.domain, subs, src_results, header_reports, asm=asm_result),
             encoding="utf-8",
         )
-        console.print(f"[green]✔[/] Reporte JSON en {args.json}")
+        console_local.print(f"[green]✔[/] Reporte JSON en {args.json}")
 
     if args.html:
         Path(args.html).write_text(
-            reporter.to_html(args.domain, subs, src_results, header_reports),
+            reporter.to_html(args.domain, subs, src_results, header_reports, asm=asm_result),
             encoding="utf-8",
         )
-        console.print(f"[green]✔[/] Reporte HTML en {args.html}")
+        console_local.print(f"[green]✔[/] Reporte HTML en {args.html}")
 
     return 0
 
