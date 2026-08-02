@@ -192,6 +192,62 @@ class Reporter:
     # JSON
     # ------------------------------------------------------------------
 
+    def print_shodan_results(self, result) -> None:
+        """Imprime en consola los resultados del enriquecimiento Shodan."""
+        if result.error:
+            self.console.print(f"[yellow]  Shodan: {result.error}[/]")
+            return
+
+        if not result.hosts:
+            self.console.print("[dim]  Shodan: sin hosts indexados para este dominio.[/]")
+            return
+
+        t = Table(
+            title=f"[bold cyan]Shodan — {result.domain}[/]  "
+                  f"([dim]{result.total_hosts} hosts totales[/])",
+            show_lines=True, border_style="cyan",
+        )
+        t.add_column("IP",          style="cyan",  width=16)
+        t.add_column("Organización", width=28)
+        t.add_column("País",         width=14)
+        t.add_column("Puertos",      width=30)
+        t.add_column("CVEs",         width=10, justify="right")
+
+        PUERTOS_PELIGROSOS = {21, 23, 111, 139, 445, 3389, 5900, 6379, 27017, 9200}
+
+        for host in result.hosts[:20]:  # Limitar a 20 hosts en consola
+            ports_str = ", ".join(
+                f"[red]{p}[/]" if p in PUERTOS_PELIGROSOS else str(p)
+                for p in sorted(host.ports)
+            )
+            vuln_str = (
+                f"[bold red]{len(host.vulns)}[/]" if host.vulns
+                else "[dim]0[/]"
+            )
+            t.add_row(
+                host.ip,
+                host.org[:26] or "—",
+                host.country[:12] or "—",
+                ports_str[:28] or "—",
+                vuln_str,
+            )
+
+        self.console.print(t)
+
+        if result.all_vulns:
+            self.console.print(
+                f"\n  [bold red]CVEs indexados por Shodan:[/] "
+                + ", ".join(result.all_vulns[:15])
+                + (" …" if len(result.all_vulns) > 15 else "")
+            )
+        if result.all_ports:
+            danger = sorted(p for p in result.all_ports if p in PUERTOS_PELIGROSOS)
+            if danger:
+                self.console.print(
+                    f"  [bold yellow]⚠ Puertos de alto riesgo expuestos:[/] "
+                    + ", ".join(str(p) for p in danger)
+                )
+
     def to_json(
         self,
         domain: str,
@@ -199,6 +255,7 @@ class Reporter:
         source_results: List[SourceResult],
         header_reports: Dict[str, List[HeaderReport]],
         asm: Optional["ASMResult"] = None,
+        shodan=None,
     ) -> str:
         payload = {
             "generated_at": datetime.utcnow().isoformat() + "Z",
@@ -231,6 +288,30 @@ class Reporter:
                 "github_enabled": asm.github_enabled,
                 "errors": asm.errors,
             }
+        if shodan and not shodan.error:
+            payload["shodan"] = {
+                "total_hosts": shodan.total_hosts,
+                "all_ports":   shodan.all_ports,
+                "all_vulns":   shodan.all_vulns,
+                "hosts": [
+                    {
+                        "ip":        h.ip,
+                        "org":       h.org,
+                        "country":   h.country,
+                        "hostnames": h.hostnames,
+                        "ports":     h.ports,
+                        "vulns":     h.vulns,
+                        "services": [
+                            {"port": s.port, "transport": s.transport,
+                             "product": s.product, "version": s.version}
+                            for s in h.services
+                        ],
+                    }
+                    for h in shodan.hosts
+                ],
+            }
+        elif shodan and shodan.error:
+            payload["shodan"] = {"error": shodan.error}
         return json.dumps(payload, indent=2, ensure_ascii=False)
 
     # ------------------------------------------------------------------
@@ -244,6 +325,7 @@ class Reporter:
         source_results: List[SourceResult],
         header_reports: Dict[str, List[HeaderReport]],
         asm: Optional["ASMResult"] = None,
+        shodan=None,
     ) -> str:
         severity_color = {
             "info":   "#4A90E2",
@@ -392,6 +474,45 @@ class Reporter:
                 f"</div>"
             )
 
+        # Sección Shodan
+        shodan_html = ""
+        if shodan:
+            if shodan.error:
+                shodan_html = f"<div class='shodan-section'><h2>Shodan</h2><p class='meta'>Error: {esc(shodan.error)}</p></div>"
+            elif shodan.hosts:
+                PUERTOS_PELIGROSOS = {21, 23, 111, 139, 445, 3389, 5900, 6379, 27017, 9200}
+                host_rows = ""
+                for h in shodan.hosts[:30]:
+                    ports_fmt = ", ".join(
+                        f"<span class='port-danger'>{p}</span>" if p in PUERTOS_PELIGROSOS
+                        else str(p)
+                        for p in sorted(h.ports)
+                    )
+                    vuln_fmt = (
+                        f"<span style='color:#ff4444;font-weight:700'>{len(h.vulns)}</span>"
+                        if h.vulns else "0"
+                    )
+                    host_rows += (
+                        f"<tr><td><code>{esc(h.ip)}</code></td>"
+                        f"<td>{esc(h.org[:30])}</td>"
+                        f"<td>{esc(h.country)}</td>"
+                        f"<td>{ports_fmt}</td>"
+                        f"<td style='text-align:right'>{vuln_fmt}</td></tr>"
+                    )
+                vulns_list = (
+                    "<p><b>CVEs indexados:</b> " + ", ".join(
+                        f"<code>{esc(v)}</code>" for v in shodan.all_vulns[:20]
+                    ) + "</p>"
+                ) if shodan.all_vulns else ""
+                shodan_html = (
+                    f"<div class='shodan-section'>"
+                    f"<h2>Shodan — {shodan.total_hosts} hosts indexados</h2>"
+                    f"{vulns_list}"
+                    f"<table><thead><tr><th>IP</th><th>Organización</th><th>País</th>"
+                    f"<th>Puertos</th><th>CVEs</th></tr></thead><tbody>{host_rows}</tbody></table>"
+                    f"</div>"
+                )
+
         return f"""<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -439,6 +560,8 @@ class Reporter:
             font-size:.8rem;overflow-x:auto;margin-top:.4rem;}}
   .flag-warn{{background:#3a2a00;color:#f0c040;padding:.1rem .4rem;border-radius:3px;font-size:.78rem;}}
   .flag-err{{background:#2a0000;color:#ff4444;padding:.1rem .4rem;border-radius:3px;font-size:.78rem;}}
+  .shodan-section{{margin-top:2rem;border-top:2px solid #ff6600;padding-top:1rem;}}
+  .port-danger{{color:#ff4444;font-weight:700;}}
 </style>
 </head>
 <body>
@@ -458,6 +581,8 @@ class Reporter:
   {headers_html}
 
   {asm_html}
+
+  {shodan_html}
 
   <footer>
     VampSecure Labs by VampSecure Studios · Uso exclusivo en entornos autorizados ·
