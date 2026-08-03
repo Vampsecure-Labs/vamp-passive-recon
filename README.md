@@ -1,90 +1,185 @@
-# vamp-passive-recon
+<p align="center">
+  <img src="https://img.shields.io/badge/version-3.0-crimson?style=flat-square" />
+  <img src="https://img.shields.io/badge/python-3.11+-blue?style=flat-square&logo=python&logoColor=white" />
+  <img src="https://img.shields.io/badge/async-aiohttp-teal?style=flat-square" />
+  <img src="https://img.shields.io/badge/VampSecure_Labs-Security_Research-8b0000?style=flat-square" />
+</p>
 
-**VampSecure Labs — Security Research Division**  
-Reconocimiento pasivo de dominios: enumeración de subdominios y análisis de cabeceras HTTP.
+<h1 align="center">vamp-passive-recon</h1>
+<p align="center"><em>Passive Recon &amp; Attack Surface Mapping Engine — VampSecure Labs</em></p>
 
 ---
 
-## Descripción
+## Overview
 
-Herramienta de OSINT/recon pasivo que realiza enumeración de subdominios e inspección de
-cabeceras HTTP de seguridad sin interactuar directamente con el objetivo. Toda la información
-se obtiene de fuentes públicas (Certificate Transparency, OTX, servicios de internet history)
-lo que la hace apta para la fase de reconocimiento pre-autorización.
+**vamp-passive-recon** is a modular passive reconnaissance tool that discovers subdomains, maps the external attack surface, and audits HTTP security headers — entirely through open-source intelligence sources, without sending a single packet directly to the target during enumeration.
 
-Utiliza AsyncIO para consultar hasta 6 fuentes en paralelo, con validación de scope por
-dominio para asegurar que el análisis se limita a los objetivos autorizados.
+The engine queries **eight OSINT sources** concurrently, deduplicates and validates results, and runs an Attack Surface Management (ASM) analysis phase that examines Certificate Transparency logs, GitHub dorks, and exposed infrastructure metadata. An optional Shodan enrichment phase appends service fingerprints and known CVEs to live hosts.
 
-## Fuentes de inteligencia
+---
 
-| Fuente | Tipo | Datos |
-|--------|------|-------|
-| crt.sh | Certificate Transparency | Subdominios por certificados TLS |
-| AlienVault OTX | Threat Intel | Subdominios registrados en pulsos |
-| HackerTarget | DNS Lookup | Resolución DNS masiva |
-| Wayback Machine | Internet Archive | URLs históricas del dominio |
-| AnubisDB | OSINT | Base de datos de subdominios |
-| urlscan.io | Web Scan History | Dominios analizados públicamente |
+## Features
 
-## Análisis de cabeceras HTTP
+- Eight concurrent OSINT sources: crt.sh, AlienVault OTX Passive DNS, HackerTarget, Wayback Machine, AnubisDB, urlscan.io, RapidDNS, BufferOver
+- ASM phase: Certificate Transparency analysis, GitHub dork enumeration (requires `GITHUB_TOKEN`), exposed infrastructure detection
+- HTTP security header audit per active host: CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Permissions-Policy, Server information leakage, Set-Cookie flag analysis
+- Optional Shodan enrichment for service fingerprinting and CVE correlation
+- Scope enforcement via `--allowed-domains` to restrict analysis to authorized targets
+- Subdomain export for use as input to other VSL tools (e.g., vamp-subdomain-takeover)
+- Three output formats: Rich console, JSON, HTML
 
-Evalúa la presencia y configuración de cabeceras de seguridad:
-- **Críticas:** CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Permissions-Policy
-- **Filtración de información:** Server, X-Powered-By, X-Generator, X-AspNet-Version
-- **Cookies:** flags Secure y HttpOnly en Set-Cookie
+---
 
-## Requisitos
+## Requirements
 
-- Python 3.9+
-- Dependencias: `aiohttp>=3.9.0`, `rich>=13.7.0`
+```
+Python 3.11+
+aiohttp >= 3.9.0
+rich >= 13.7.0
+```
 
-## Instalación
+Install dependencies:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Uso
+---
+
+## Installation
 
 ```bash
-# Recon básico de un dominio
-python3 vamp_passive_recon.py ejemplo.com
-
-# Con scope explícito (solo analiza subdominios del dominio autorizado)
-python3 vamp_passive_recon.py ejemplo.com --allowed-domains ejemplo.com,subdominio.ejemplo.com
-
-# Exportar resultados
-python3 vamp_passive_recon.py ejemplo.com --output-json resultado.json --output-html resultado.html
+git clone https://github.com/belky-me/vamp-passive-recon.git
+cd vamp-passive-recon
+pip install -r requirements.txt
 ```
-
-## Opciones
-
-| Opción | Descripción |
-|--------|-------------|
-| `domain` | Dominio objetivo |
-| `--allowed-domains` | Lista de dominios autorizados separados por coma |
-| `--output-json` | Guardar subdominios encontrados en JSON |
-| `--output-html` | Guardar informe completo en HTML con tema oscuro |
-| `--timeout` | Timeout por fuente en segundos (por defecto: 15) |
-| `--concurrency` | Peticiones concurrentes por fuente (por defecto: 5) |
-
-## Flujo de análisis
-
-1. **Validación de scope** — Comprueba que el dominio objetivo está en la lista autorizada
-2. **Enumeración de subdominios** — Consulta todas las fuentes en paralelo y deduplica
-3. **Análisis de cabeceras** — Hace HEAD a cada subdominio activo y evalúa seguridad
-4. **Generación de informes** — Consola Rich + ficheros JSON/HTML opcionales
-
-## Aviso legal
-
-Esta herramienta solo usa fuentes públicas pasivas. No realiza peticiones directas al
-objetivo durante la enumeración de subdominios. El análisis de cabeceras HTTP implica
-una petición HEAD por dominio activo: asegúrate de tener autorización antes de usar esta
-opción en producción.
 
 ---
 
-© VampSecure Studios — VampSecure Labs Security Research Division  
-Licencia: MIT
+## Configuration
+
+| Variable | Purpose | Required |
+|----------|---------|----------|
+| `OTX_API_KEY` | AlienVault OTX Passive DNS enrichment | Optional — increases OTX data volume |
+| `GITHUB_TOKEN` | GitHub dork queries in the ASM phase | Optional — required for GitHub ASM |
+
+```bash
+export OTX_API_KEY=your_otx_key
+export GITHUB_TOKEN=your_github_token
+```
+
+---
+
+## Usage
+
+```
+python vamp_passive_recon.py -d DOMAIN [OPTIONS]
+
+Required:
+  -d, --domain DOMAIN            Target apex domain to enumerate
+
+Scope:
+      --allowed-domains DOM,...  Comma-separated list of domains to include in header analysis
+                                 (default: target domain only)
+
+Analysis control:
+      --no-headers               Skip the HTTP security header audit phase
+      --no-asm                   Skip the ASM (attack surface mapping) phase
+      --max-hosts N              Maximum hosts to probe in header analysis (default: 15)
+      --concurrency N            Concurrent OSINT source queries (default: 5)
+
+Enrichment:
+      --shodan-key API_KEY       Shodan API key for service fingerprinting
+
+Output:
+      --json FILE                Write findings to JSON
+      --html FILE                Generate standalone HTML report
+      --subs-out FILE            Write subdomain list only (one per line)
+      --quiet                    Suppress console output (useful for piping)
+```
+
+---
+
+## Examples
+
+Basic passive recon of a target domain:
+
+```bash
+python vamp_passive_recon.py -d example.com
+```
+
+Full recon with ASM phase and HTML report:
+
+```bash
+python vamp_passive_recon.py -d example.com --json recon.json --html report.html
+```
+
+Export subdomain list as input for the subdomain takeover scanner:
+
+```bash
+python vamp_passive_recon.py -d example.com --subs-out subdomains.txt --no-headers --no-asm
+python vamp_subdomain_takeover.py -d example.com -f subdomains.txt
+```
+
+Recon with Shodan enrichment and restricted header analysis scope:
+
+```bash
+python vamp_passive_recon.py -d example.com \
+  --allowed-domains example.com,api.example.com \
+  --shodan-key YOUR_KEY \
+  --html full_report.html
+```
+
+---
+
+## Output Formats
+
+| Format | How to enable | Description |
+|--------|---------------|-------------|
+| Console | Default | Rich panels: subdomain table, ASM findings, header audit summary |
+| JSON | `--json FILE` | All findings with source attribution, header scores, and ASM data |
+| HTML | `--html FILE` | Standalone report with tabbed sections for each analysis phase |
+| Subdomains | `--subs-out FILE` | Plain text subdomain list for pipeline chaining |
+
+---
+
+## Exit Codes
+
+| Code | Meaning | CI/CD usage |
+|------|---------|-------------|
+| `0` | Recon complete — no high-severity header or ASM findings | Pass gate |
+| `1` | Moderate findings (missing security headers, minor exposure) | Review recommended |
+| `2` | High-severity ASM findings or critical header misconfigurations | Fail gate |
+
+---
+
+## Analysis Phases
+
+| Phase | Sources / Actions |
+|-------|------------------|
+| 1. Subdomain enumeration | crt.sh, OTX, HackerTarget, Wayback, AnubisDB, urlscan.io, RapidDNS, BufferOver |
+| 2. ASM analysis | Certificate Transparency deep scan, GitHub dorks, exposed service detection |
+| 3. Header audit | HEAD request per active host — security header presence and configuration |
+| 4. Shodan enrichment | Port scan results, service banners, CVE annotations (optional) |
+
+---
+
+## Part of VampSecure Labs Toolkit
+
+`vamp-passive-recon` is part of the **VampSecure Labs Security Research Toolkit** — a collection of professional-grade, self-hosted security assessment tools.
+
+| Tool | Purpose |
+|------|---------|
+| [vamp-forticheck](https://github.com/belky-me/vamp-forticheck) | Multi-vendor edge device CVE scanner |
+| [vamp-cve-oracle](https://github.com/belky-me/vamp-cve-oracle) | CVE intelligence and RBVM engine |
+| [vamp-passive-recon](https://github.com/belky-me/vamp-passive-recon) | Passive recon and attack surface mapping |
+| [vamp-subdomain-takeover](https://github.com/belky-me/vamp-subdomain-takeover) | Subdomain takeover vulnerability scanner |
+| [vamp-cloud-enum](https://github.com/belky-me/vamp-cloud-enum) | Cloud storage bucket enumerator |
+| [vamp-orchestrator](https://github.com/belky-me/vamp-orchestrator) | Multi-tool assessment orchestrator |
+
+---
+
+<p align="center">
+  © VampSecure Studios — VampSecure Labs Security Research Division<br/>
+  For authorized security assessments only. Unauthorized use is prohibited.
+</p>
