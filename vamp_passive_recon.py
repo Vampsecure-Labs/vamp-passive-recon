@@ -253,6 +253,279 @@ class ShodanEnricher:
         result.all_vulns = sorted(all_vulns)
 
 
+# =============================================================================
+# INTEGRACIÓN CENSYS
+# =============================================================================
+
+@dataclass
+class CensysHostResult:
+    """Host indexado por Censys con sus servicios y localización."""
+    ip:       str
+    asn:      int  = 0
+    org:      str  = ""
+    country:  str  = ""
+    ports:    list = field(default_factory=list)    # List[int]
+    services: list = field(default_factory=list)    # List[str] — "443/HTTPS"
+
+
+@dataclass
+class CensysResult:
+    """Resultado agregado de búsqueda Censys para un dominio."""
+    domain:      str
+    hosts:       list = field(default_factory=list)
+    total_hosts: int  = 0
+    all_ports:   list = field(default_factory=list)
+    error:       Optional[str] = None
+
+
+class CensysCollector:
+    """
+    Enriquecimiento OSINT mediante la API v2 de Censys.
+
+    Consulta el endpoint de búsqueda de hosts con la query
+    `dns.names: <domain>` para localizar hosts que tienen el dominio
+    en sus certificados TLS o registros DNS indexados.
+
+    Credenciales: censys.io → Account → API Access (ID + Secret).
+    Plan Free: 250 búsquedas/mes.
+    """
+
+    _SEARCH_URL = "https://search.censys.io/api/v2/hosts/search"
+
+    def __init__(self, api_id: str, api_secret: str) -> None:
+        import base64
+        creds = f"{api_id}:{api_secret}"
+        self._auth = "Basic " + base64.b64encode(creds.encode()).decode()
+
+    async def collect(self, domain: str) -> CensysResult:
+        """Consulta Censys y construye un CensysResult para el dominio dado."""
+        import aiohttp as _aiohttp
+        result = CensysResult(domain=domain)
+        try:
+            headers = {
+                "Authorization": self._auth,
+                "User-Agent": f"{TOOL_NAME}/{VERSION}",
+            }
+            params = {"q": f"dns.names: {domain}", "per_page": "50"}
+            async with _aiohttp.ClientSession(headers=headers) as session:
+                async with session.get(
+                    self._SEARCH_URL, params=params, timeout=20, ssl=True
+                ) as resp:
+                    if resp.status == 401:
+                        result.error = "Credenciales Censys inválidas (ID/Secret)."
+                        return result
+                    if resp.status == 429:
+                        result.error = "Límite de peticiones Censys alcanzado."
+                        return result
+                    if resp.status != 200:
+                        result.error = f"Censys API HTTP {resp.status}."
+                        return result
+                    data = await resp.json(content_type=None)
+        except Exception as exc:
+            result.error = f"Error de red consultando Censys: {str(exc)[:100]}"
+            return result
+
+        hits      = data.get("result", {}).get("hits", [])
+        result.total_hosts = data.get("result", {}).get("total", len(hits))
+        all_ports: set = set()
+
+        for hit in hits:
+            ip = hit.get("ip", "")
+            if not ip:
+                continue
+            loc      = hit.get("location", {})
+            asn_data = hit.get("autonomous_system", {})
+            ports: list = []
+            service_labels: list = []
+            for svc in hit.get("services", []):
+                p = svc.get("port")
+                if p:
+                    ports.append(p)
+                    all_ports.add(p)
+                    label = f"{p}/{svc.get('service_name', '?').upper()}"
+                    service_labels.append(label)
+            result.hosts.append(CensysHostResult(
+                ip      = ip,
+                asn     = asn_data.get("asn", 0),
+                org     = asn_data.get("description", ""),
+                country = loc.get("country", ""),
+                ports   = ports,
+                services= service_labels,
+            ))
+
+        result.all_ports = sorted(all_ports)
+        return result
+
+
+# =============================================================================
+# INTEGRACIÓN VIRUSTOTAL
+# =============================================================================
+
+@dataclass
+class VTSubdomain:
+    """Subdominio descubierto por VirusTotal con su puntuación de seguridad."""
+    fqdn:      str
+    last_seen: str = ""
+    vt_score:  str = ""    # "maliciosas/total"
+
+
+@dataclass
+class VTResult:
+    """Resultado de consulta VirusTotal para un dominio."""
+    domain:     str
+    subdomains: list = field(default_factory=list)
+    error:      Optional[str] = None
+
+
+class VirusTotalCollector:
+    """
+    Descubrimiento de subdominios mediante la API v3 de VirusTotal.
+
+    Consulta el endpoint /domains/{domain}/subdomains para recuperar
+    subdominios conocidos junto a su puntuación de seguridad agregada
+    de los motores de análisis de VT.
+
+    Clave API: virustotal.com → Perfil → API Key.
+    Plan Free: 500 peticiones/día, 4 por minuto.
+    """
+
+    _BASE_URL = "https://www.virustotal.com/api/v3"
+
+    def __init__(self, api_key: str) -> None:
+        self._key = api_key
+
+    async def collect(self, domain: str) -> VTResult:
+        """Recupera subdominios de VirusTotal para el dominio dado."""
+        import aiohttp as _aiohttp
+        result = VTResult(domain=domain)
+        try:
+            headers = {
+                "x-apikey": self._key,
+                "User-Agent": f"{TOOL_NAME}/{VERSION}",
+            }
+            url    = f"{self._BASE_URL}/domains/{domain}/subdomains"
+            params = {"limit": "40"}
+            async with _aiohttp.ClientSession(headers=headers) as session:
+                async with session.get(
+                    url, params=params, timeout=20, ssl=True
+                ) as resp:
+                    if resp.status == 401:
+                        result.error = "Clave API VirusTotal inválida."
+                        return result
+                    if resp.status == 429:
+                        result.error = "Límite de peticiones VirusTotal alcanzado."
+                        return result
+                    if resp.status != 200:
+                        result.error = f"VirusTotal API HTTP {resp.status}."
+                        return result
+                    data = await resp.json(content_type=None)
+        except Exception as exc:
+            result.error = f"Error de red consultando VirusTotal: {str(exc)[:100]}"
+            return result
+
+        for entry in data.get("data", []):
+            attrs    = entry.get("attributes", {})
+            stats    = attrs.get("last_analysis_stats", {})
+            malicious = stats.get("malicious", 0)
+            total    = sum(stats.values())
+            result.subdomains.append(VTSubdomain(
+                fqdn      = entry.get("id", ""),
+                last_seen = attrs.get("last_dns_records_date", ""),
+                vt_score  = f"{malicious}/{total}" if total else "",
+            ))
+
+        return result
+
+
+# =============================================================================
+# INTEGRACIÓN LEAKIX
+# =============================================================================
+
+@dataclass
+class LeakIXService:
+    """Servicio o fuga indexada por LeakIX."""
+    ip:       str
+    port:     int
+    protocol: str  = ""
+    summary:  str  = ""
+    is_leak:  bool = False    # True si el plugin detectó una fuga de datos
+
+
+@dataclass
+class LeakIXResult:
+    """Resultado de búsqueda LeakIX para un dominio."""
+    domain:   str
+    services: list = field(default_factory=list)
+    leaks:    int  = 0
+    error:    Optional[str] = None
+
+
+class LeakIXCollector:
+    """
+    Búsqueda de servicios expuestos y fugas de datos mediante la API de LeakIX.
+
+    Consulta el endpoint /domain/<domain> para recuperar servicios indexados
+    y posibles fugas de datos asociadas (bases de datos expuestas, paneles
+    sin autenticación, etc.).
+
+    Clave API: app.leakix.net → Account → API Key.
+    Sin clave el endpoint devuelve solo servicios, sin datos de fugas.
+    """
+
+    _BASE_URL = "https://leakix.net"
+
+    def __init__(self, api_key: str = "") -> None:
+        self._key = api_key
+
+    async def collect(self, domain: str) -> LeakIXResult:
+        """Consulta LeakIX y construye un LeakIXResult para el dominio dado."""
+        import aiohttp as _aiohttp
+        result = LeakIXResult(domain=domain)
+        try:
+            headers: dict = {
+                "Accept": "application/json",
+                "User-Agent": f"{TOOL_NAME}/{VERSION}",
+            }
+            if self._key:
+                headers["api-key"] = self._key
+            url = f"{self._BASE_URL}/domain/{domain}"
+            async with _aiohttp.ClientSession(headers=headers) as session:
+                async with session.get(url, timeout=20, ssl=True) as resp:
+                    if resp.status == 401:
+                        result.error = "Clave API LeakIX inválida."
+                        return result
+                    if resp.status == 429:
+                        result.error = "Límite de peticiones LeakIX alcanzado."
+                        return result
+                    if resp.status == 404:
+                        return result    # dominio sin resultados — normal
+                    if resp.status != 200:
+                        result.error = f"LeakIX API HTTP {resp.status}."
+                        return result
+                    data = await resp.json(content_type=None)
+        except Exception as exc:
+            result.error = f"Error de red consultando LeakIX: {str(exc)[:100]}"
+            return result
+
+        if not isinstance(data, list):
+            data = []
+
+        for entry in data:
+            is_leak = bool(entry.get("leak", {}).get("stage"))
+            svc = LeakIXService(
+                ip       = entry.get("ip", ""),
+                port     = int(entry.get("port", 0) or 0),
+                protocol = entry.get("protocol", ""),
+                summary  = (entry.get("summary", "") or "")[:120],
+                is_leak  = is_leak,
+            )
+            result.services.append(svc)
+            if is_leak:
+                result.leaks += 1
+
+        return result
+
+
 def _load_dotenv() -> None:
     """
     Carga variables de entorno desde .env en el mismo directorio.
@@ -335,6 +608,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--shodan-key", metavar="API_KEY",
                    help="Clave API de Shodan (o variable SHODAN_API_KEY) para enriquecimiento "
                         "OSINT — habilita Fase 4: puertos, servicios, CVEs indexados")
+    p.add_argument("--censys-id", metavar="API_ID",
+                   help="ID de API Censys (o var CENSYS_API_ID) — habilita Fase 5: "
+                        "hosts indexados por certificado TLS/DNS")
+    p.add_argument("--censys-secret", metavar="API_SECRET",
+                   help="Secret de API Censys (o var CENSYS_API_SECRET; requerido junto a --censys-id)")
+    p.add_argument("--vt-key", metavar="API_KEY",
+                   help="Clave API VirusTotal (o var VT_API_KEY) — habilita Fase 6: "
+                        "subdominios conocidos con puntuación de seguridad")
+    p.add_argument("--leakix-key", metavar="API_KEY",
+                   help="Clave API LeakIX (o var LEAKIX_API_KEY) — habilita Fase 7: "
+                        "servicios expuestos y fugas de datos indexadas")
     from vampsec_report import add_report_args
     add_report_args(p)
     return p.parse_args()
@@ -434,6 +718,74 @@ async def run(args: argparse.Namespace) -> int:
             shodan_result = await enricher.enrich(args.domain)
         reporter.print_shodan_results(shodan_result)
 
+    # ── Fase 5: Enriquecimiento Censys (opcional) ─────────────────────────────
+    censys_result = None
+    censys_id     = getattr(args, "censys_id", None) or os.environ.get("CENSYS_API_ID", "")
+    censys_secret = getattr(args, "censys_secret", None) or os.environ.get("CENSYS_API_SECRET", "")
+    if censys_id and censys_secret:
+        console_local.print("\n[bold]>> Fase 5: enriquecimiento Censys (hosts por TLS/DNS)[/]\n")
+        censys_col = CensysCollector(censys_id, censys_secret)
+        with console_local.status("[cyan]Consultando Censys API…[/]", spinner="dots"):
+            censys_result = await censys_col.collect(args.domain)
+        if censys_result.error:
+            console_local.print(f"[yellow]⚠ Censys: {censys_result.error}[/]")
+        else:
+            console_local.print(
+                f"  Hosts indexados: [bold]{censys_result.total_hosts}[/] · "
+                f"Puertos únicos: {len(censys_result.all_ports)}"
+            )
+            for host in censys_result.hosts[:10]:
+                console_local.print(
+                    f"  [cyan]{host.ip}[/] ({host.country}) — "
+                    + ", ".join(host.services[:5])
+                )
+
+    # ── Fase 6: Subdominios VirusTotal (opcional) ─────────────────────────────
+    vt_result = None
+    vt_key = getattr(args, "vt_key", None) or os.environ.get("VT_API_KEY", "")
+    if vt_key:
+        console_local.print("\n[bold]>> Fase 6: subdominios VirusTotal[/]\n")
+        vt_col = VirusTotalCollector(vt_key)
+        with console_local.status("[cyan]Consultando VirusTotal API…[/]", spinner="dots"):
+            vt_result = await vt_col.collect(args.domain)
+        if vt_result.error:
+            console_local.print(f"[yellow]⚠ VirusTotal: {vt_result.error}[/]")
+        else:
+            new_subs = {s.fqdn for s in vt_result.subdomains if s.fqdn} - subs
+            subs.update(new_subs)
+            console_local.print(
+                f"  Subdominios VT: [bold]{len(vt_result.subdomains)}[/] · "
+                f"Nuevos (no en otras fuentes): {len(new_subs)}"
+            )
+            flagged = [s for s in vt_result.subdomains
+                       if s.vt_score and not s.vt_score.startswith("0/")]
+            if flagged:
+                console_local.print(
+                    f"  [red]⚠ {len(flagged)} subdominios con detecciones en VirusTotal[/]"
+                )
+
+    # ── Fase 7: LeakIX — servicios expuestos y fugas (opcional) ───────────────
+    leakix_result = None
+    leakix_key = getattr(args, "leakix_key", None) or os.environ.get("LEAKIX_API_KEY", "")
+    if leakix_key is not None and leakix_key != "":
+        console_local.print("\n[bold]>> Fase 7: LeakIX — servicios expuestos y fugas[/]\n")
+        leakix_col = LeakIXCollector(leakix_key)
+        with console_local.status("[cyan]Consultando LeakIX…[/]", spinner="dots"):
+            leakix_result = await leakix_col.collect(args.domain)
+        if leakix_result.error:
+            console_local.print(f"[yellow]⚠ LeakIX: {leakix_result.error}[/]")
+        else:
+            console_local.print(
+                f"  Servicios indexados: [bold]{len(leakix_result.services)}[/] · "
+                f"Fugas detectadas: [bold {'red' if leakix_result.leaks else 'green'}]"
+                f"{leakix_result.leaks}[/]"
+            )
+            for svc in leakix_result.services[:8]:
+                icon = "[red]FUGA[/]" if svc.is_leak else "svc"
+                console_local.print(
+                    f"  [{icon}] {svc.ip}:{svc.port}/{svc.protocol} — {svc.summary[:60]}"
+                )
+
     # ── Salidas a fichero ─────────────────────────────────────────────────────
     if args.subs_out:
         Path(args.subs_out).write_text("\n".join(sorted(subs)) + "\n", encoding="utf-8")
@@ -460,7 +812,8 @@ async def run(args: argparse.Namespace) -> int:
         from vampsec_report import VampSecReport, meta_from_args
         meta    = meta_from_args(args, tool=TOOL_NAME, version=VERSION)
         vsl_rep = VampSecReport(meta, _findings_vsl(args.domain, subs, header_reports, asm_result,
-                                                     shodan=shodan_result))
+                                                     shodan=shodan_result,
+                                                     vt=vt_result, leakix=leakix_result))
         if args.report_html:
             vsl_rep.to_html_client(args.report_html)
             console_local.print(f"[green]✔[/] Informe cliente HTML: {args.report_html}")
@@ -491,7 +844,8 @@ def main() -> None:
 # CONVERSIÓN A FORMATO DE INFORME UNIFICADO VSL
 # =============================================================================
 
-def _findings_vsl(domain: str, subs: set, header_reports: dict, asm_result, shodan=None) -> list:
+def _findings_vsl(domain: str, subs: set, header_reports: dict, asm_result,
+                  shodan=None, vt=None, leakix=None) -> list:
     """
     Convierte los resultados de vamp-passive-recon al formato Finding de vampsec_report.
 
@@ -662,6 +1016,63 @@ def _findings_vsl(domain: str, subs: set, header_reports: dict, asm_result, shod
                 ),
                 cve         = cve_id,
                 tags        = ["shodan", "cve", "osint"],
+            ))
+
+    # ── Hallazgos LeakIX: fugas de datos ──
+    if leakix and not leakix.error and leakix.leaks:
+        fugas = [s for s in leakix.services if s.is_leak]
+        n += 1
+        evidencia = "\n".join(
+            f"  {s.ip}:{s.port}/{s.protocol} — {s.summary[:80]}"
+            for s in fugas[:10]
+        )
+        findings.append(VSLFinding(
+            id          = f"RECON-{n:03d}",
+            title       = f"LeakIX: {leakix.leaks} fugas de datos indexadas en {domain}",
+            severity    = "CRITICAL",
+            description = (
+                f"LeakIX ha indexado {leakix.leaks} fuga(s) de datos activas asociadas "
+                f"al dominio {domain}. Estas fugas pueden incluir bases de datos expuestas, "
+                "paneles sin autenticación o ficheros de configuración accesibles públicamente."
+            ),
+            evidence    = f"Fugas indexadas:\n{evidencia}",
+            affected    = domain,
+            remediation = (
+                "Identificar y cerrar inmediatamente los servicios expuestos listados. "
+                "Revocar credenciales y rotar secretos que puedan haber sido accesibles. "
+                "Aplicar autenticación y restricción de acceso por IP a los servicios afectados. "
+                "Referencia: https://leakix.net"
+            ),
+            tags        = ["leakix", "data-leak", "critical-exposure"],
+        ))
+
+    # ── Hallazgos VirusTotal: subdominios marcados como maliciosos ──
+    if vt and not vt.error:
+        maliciosos = [s for s in vt.subdomains
+                      if s.vt_score and not s.vt_score.startswith("0/")]
+        for sub_vt in maliciosos[:5]:
+            n += 1
+            findings.append(VSLFinding(
+                id          = f"RECON-{n:03d}",
+                title       = f"Subdominio marcado como malicioso en VT: {sub_vt.fqdn}"[:80],
+                severity    = "HIGH",
+                description = (
+                    f"VirusTotal reporta detecciones de seguridad para el subdominio {sub_vt.fqdn} "
+                    f"({sub_vt.vt_score} motores). Puede indicar compromiso, phishing o "
+                    "distribución de malware desde un subdominio del dominio auditado."
+                ),
+                evidence    = (
+                    f"Subdominio: {sub_vt.fqdn}\n"
+                    f"Detecciones VT: {sub_vt.vt_score}\n"
+                    f"Última actividad: {sub_vt.last_seen or 'desconocida'}"
+                ),
+                affected    = sub_vt.fqdn,
+                remediation = (
+                    "Revisar el subdominio en VirusTotal para obtener el detalle de las detecciones. "
+                    "Si el subdominio está comprometido, deshabilitar o redirigir su DNS. "
+                    "Notificar a los usuarios que puedan haber interactuado con él."
+                ),
+                tags        = ["virustotal", "malicious-subdomain", "threat-intel"],
             ))
 
     return findings
