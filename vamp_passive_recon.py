@@ -69,7 +69,11 @@ from rich.console import Console
 from rich.panel import Panel
 
 from asm import ASMAnalyzer
-from sources import SubdomainEnumerator
+from sources import (
+    SubdomainEnumerator, DEFAULT_SOURCES,
+    Censys as _CensysSource,
+    SecurityTrails as _SecurityTrailsSource,
+)
 from headers import HeaderAnalyzer
 from reporter import Reporter
 
@@ -619,6 +623,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--leakix-key", metavar="API_KEY",
                    help="Clave API LeakIX (o var LEAKIX_API_KEY) — habilita Fase 7: "
                         "servicios expuestos y fugas de datos indexadas")
+    p.add_argument("--censys", action="store_true",
+                   help="Activar fuente Censys para enumeración de subdominios via "
+                        "Certificate Search API (requiere --censys / "
+                        "env CENSYS_API_ID+CENSYS_API_SECRET)")
+    p.add_argument("--securitytrails", action="store_true",
+                   help="Activar fuente SecurityTrails para enumeración de subdominios "
+                        "(requiere env SECURITYTRAILS_API_KEY)")
+    p.add_argument("--export-oracle", metavar="FILE",
+                   help="Exportar hosts vivos con banners al formato de entrada de "
+                        "vamp-cve-oracle (lista JSON con claves host, port, product, version)")
     from vampsec_report import add_report_args
     add_report_args(p)
     return p.parse_args()
@@ -654,11 +668,29 @@ async def run(args: argparse.Namespace) -> int:
         console_local.print(f"[green]✔ Scope validado:[/] {args.domain} ∈ {{{', '.join(allowed)}}}\n")
 
     # ── Fase 1: Enumeración de subdominios ───────────────────────────────────
-    console_local.print("\n[bold]>> Fase 1: enumeración pasiva de subdominios (8 fuentes)[/]\n")
-    enumerator = SubdomainEnumerator()
+    # Construir lista de fuentes: predeterminadas + opcionales por flag
+    fuentes_activas = list(DEFAULT_SOURCES)
+    fuentes_extra_nombres: list = []
+    if getattr(args, "censys", False):
+        if os.environ.get("CENSYS_API_ID") and os.environ.get("CENSYS_API_SECRET"):
+            fuentes_activas.append(_CensysSource)
+            fuentes_extra_nombres.append("Censys")
+        else:
+            console_local.print("[yellow]⚠ --censys activo pero CENSYS_API_ID/CENSYS_API_SECRET no definidos — fuente ignorada[/]")
+    if getattr(args, "securitytrails", False):
+        if os.environ.get("SECURITYTRAILS_API_KEY"):
+            fuentes_activas.append(_SecurityTrailsSource)
+            fuentes_extra_nombres.append("SecurityTrails")
+        else:
+            console_local.print("[yellow]⚠ --securitytrails activo pero SECURITYTRAILS_API_KEY no definida — fuente ignorada[/]")
+
+    n_fuentes = len(fuentes_activas)
+    extra_label = (" · " + " · ".join(fuentes_extra_nombres)) if fuentes_extra_nombres else ""
+    console_local.print(f"\n[bold]>> Fase 1: enumeración pasiva de subdominios ({n_fuentes} fuentes)[/]\n")
+    enumerator = SubdomainEnumerator(fuentes_activas)
     with console_local.status(
-        "[cyan]Consultando fuentes: crt.sh · OTX · HackerTarget · Wayback · "
-        "AnubisDB · urlscan · RapidDNS · BufferOver…[/]",
+        f"[cyan]Consultando fuentes: crt.sh · OTX · HackerTarget · Wayback · "
+        f"AnubisDB · urlscan · RapidDNS · BufferOver{extra_label}…[/]",
         spinner="dots",
     ):
         subs, src_results = await enumerator.enumerate(args.domain)
@@ -786,6 +818,18 @@ async def run(args: argparse.Namespace) -> int:
                     f"  [{icon}] {svc.ip}:{svc.port}/{svc.protocol} — {svc.summary[:60]}"
                 )
 
+    # ── Export oracle (formato de entrada para vamp-cve-oracle) ─────────────
+    if getattr(args, "export_oracle", None):
+        oracle_data = _build_oracle_export(subs, header_reports, asm_result, shodan_result)
+        Path(args.export_oracle).write_text(
+            _json_mod.dumps(oracle_data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        console_local.print(
+            f"[green]✔[/] Oracle export guardado en {args.export_oracle} "
+            f"({len(oracle_data)} entradas)"
+        )
+
     # ── Salidas a fichero ─────────────────────────────────────────────────────
     if args.subs_out:
         Path(args.subs_out).write_text("\n".join(sorted(subs)) + "\n", encoding="utf-8")
@@ -825,6 +869,79 @@ async def run(args: argparse.Namespace) -> int:
                 console_local.print(f"[yellow]⚠ PDF no generado: {e}[/yellow]")
 
     return 0
+
+
+def _build_oracle_export(
+    subs: set,
+    header_reports: dict,
+    asm_result,
+    shodan_result,
+) -> list:
+    """
+    Construye la lista de dicts para importar en vamp-cve-oracle.
+
+    Para cada host vivo (que respondió en la fase de cabeceras) genera una o
+    varias entradas con claves host, port, product, version siguiendo el
+    esquema que acepta vamp-cve-oracle como input de productos.
+
+    Si hay datos Shodan se usa su inventario de servicios (más preciso).
+    En caso contrario se usa el producto detectado por ASM con puerto 443/80.
+    """
+    oracle: list = []
+    seen: set = set()
+
+    # Producto/versión global del ASM como fallback
+    top_product = ""
+    top_version = ""
+    if asm_result and asm_result.tech_stack:
+        top = asm_result.tech_stack[0]
+        top_product = top.name
+        top_version = top.version
+
+    # Hosts que respondieron en la fase de cabeceras (o todos los subdominios)
+    alive_hosts: set = set(header_reports.keys()) if header_reports else subs
+
+    # Construir mapa hostname→servicios a partir de los datos Shodan
+    shodan_by_hostname: dict = {}
+    if shodan_result and not shodan_result.error:
+        for sh_host in shodan_result.hosts:
+            # Asociar por IP y por hostnames canónicos
+            keys_a_asignar = [sh_host.ip] + list(sh_host.hostnames)
+            for svc in sh_host.services:
+                entry = {
+                    "port":    svc.port,
+                    "product": svc.product or top_product,
+                    "version": svc.version or top_version,
+                }
+                for key in keys_a_asignar:
+                    if key not in shodan_by_hostname:
+                        shodan_by_hostname[key] = []
+                    shodan_by_hostname[key].append(entry)
+
+    # Generar entradas oracle para cada host vivo
+    for host in sorted(alive_hosts):
+        if host in shodan_by_hostname:
+            # Usar datos Shodan: un dict por servicio
+            for svc_entry in shodan_by_hostname[host]:
+                key = (host, svc_entry["port"])
+                if key not in seen:
+                    oracle.append({"host": host, **svc_entry})
+                    seen.add(key)
+        else:
+            # Fallback: un dict con puerto HTTPS o HTTP y producto del ASM
+            for port in (443, 80):
+                key = (host, port)
+                if key not in seen:
+                    oracle.append({
+                        "host":    host,
+                        "port":    port,
+                        "product": top_product,
+                        "version": top_version,
+                    })
+                    seen.add(key)
+                    break   # Solo un puerto por host en modo fallback
+
+    return oracle
 
 
 def main() -> None:

@@ -337,6 +337,107 @@ class BufferOver(PassiveSource):
 
 
 # ---------------------------------------------------------------------------
+# Fuentes opcionales con API key (activadas por flag en la CLI)
+# ---------------------------------------------------------------------------
+
+class Censys(PassiveSource):
+    """
+    Censys Certificate Search API v2 — descubrimiento de subdominios por
+    nombres presentes en certificados TLS emitidos e indexados por Censys.
+
+    Requiere variables de entorno CENSYS_API_ID y CENSYS_API_SECRET.
+    Activar con el flag --censys en la CLI (requiere --censys /
+    env CENSYS_API_ID+CENSYS_API_SECRET).
+    Plan Free: 250 búsquedas/mes en censys.io.
+    """
+    name = "Censys"
+
+    async def fetch(self, session: aiohttp.ClientSession, domain: str) -> SourceResult:
+        result = SourceResult(self.name)
+        api_id     = os.environ.get("CENSYS_API_ID", "")
+        api_secret = os.environ.get("CENSYS_API_SECRET", "")
+        if not api_id or not api_secret:
+            result.error = "CENSYS_API_ID o CENSYS_API_SECRET no definidos"
+            return result
+
+        # Autenticación Basic (ID:Secret en base64)
+        import base64
+        token = base64.b64encode(f"{api_id}:{api_secret}".encode()).decode()
+        hdrs  = {"Authorization": f"Basic {token}"}
+        url   = "https://search.censys.io/api/v2/certificates/search"
+        # Busca certificados cuyos SANs incluyan el dominio objetivo
+        params = {"q": f"parsed.names: {domain}", "per_page": "100"}
+
+        try:
+            async with session.get(url, headers=hdrs, params=params,
+                                   timeout=DEFAULT_TIMEOUT) as r:
+                if r.status == 401:
+                    result.error = "Credenciales Censys inválidas (ID/Secret)"
+                    return result
+                if r.status == 429:
+                    result.error = "HTTP 429 rate limit Censys"
+                    return result
+                if r.status != 200:
+                    result.error = f"HTTP {r.status}"
+                    return result
+                data = await r.json(content_type=None)
+                # hits[] contiene parsed.names (lista de FQDNs en el certificado)
+                for hit in data.get("result", {}).get("hits", []):
+                    for name in (hit.get("parsed", {}).get("names") or []):
+                        cleaned = _clean(name, domain)
+                        if cleaned:
+                            result.subdomains.add(cleaned)
+        except Exception as e:
+            result.error = f"{type(e).__name__}: {e}"
+        return result
+
+
+class SecurityTrails(PassiveSource):
+    """
+    SecurityTrails Subdomain API — historial y subdominios activos del dominio.
+
+    Requiere variable de entorno SECURITYTRAILS_API_KEY.
+    Activar con el flag --securitytrails en la CLI (requiere
+    env SECURITYTRAILS_API_KEY).
+    """
+    name = "SecurityTrails"
+
+    async def fetch(self, session: aiohttp.ClientSession, domain: str) -> SourceResult:
+        result = SourceResult(self.name)
+        api_key = os.environ.get("SECURITYTRAILS_API_KEY", "")
+        if not api_key:
+            result.error = "SECURITYTRAILS_API_KEY no definida"
+            return result
+
+        hdrs = {"apikey": api_key, "Accept": "application/json"}
+        url  = f"https://api.securitytrails.com/v1/domain/{quote_plus(domain)}/subdomains"
+
+        try:
+            async with session.get(url, headers=hdrs, timeout=DEFAULT_TIMEOUT) as r:
+                if r.status == 401:
+                    result.error = "SECURITYTRAILS_API_KEY inválida o sin permisos"
+                    return result
+                if r.status == 429:
+                    result.error = "HTTP 429 rate limit SecurityTrails"
+                    return result
+                if r.status != 200:
+                    result.error = f"HTTP {r.status}"
+                    return result
+                data = await r.json(content_type=None)
+                # La API devuelve {"subdomains": ["www", "mail", ...]}
+                # Son prefijos; se concatenan con el dominio apex
+                for sub in (data.get("subdomains") or []):
+                    if sub:
+                        fqdn    = f"{sub}.{domain}"
+                        cleaned = _clean(fqdn, domain)
+                        if cleaned:
+                            result.subdomains.add(cleaned)
+        except Exception as e:
+            result.error = f"{type(e).__name__}: {e}"
+        return result
+
+
+# ---------------------------------------------------------------------------
 # Orquestador
 # ---------------------------------------------------------------------------
 
