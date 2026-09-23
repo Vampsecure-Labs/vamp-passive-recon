@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vamp-passive-recon"
-version = "1.1.0"
+version = "1.2.0"
 description = "Passive recon engine — subdomain enumeration, HTTP fingerprinting and GitHub dork scanning across 8 OSINT sources"
 readme = "README.md"
 license = { text = "MIT" }

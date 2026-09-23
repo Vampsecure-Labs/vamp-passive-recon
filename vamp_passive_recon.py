@@ -78,7 +78,7 @@ from headers import HeaderAnalyzer
 from reporter import Reporter
 
 
-VERSION   = "3.0"
+VERSION   = "1.2.0"
 TOOL_NAME = "vamp-passive-recon"
 
 console = Console()
@@ -89,7 +89,7 @@ __   ___   __  __ ___  ___ ___ ___ _   _ ___ ___ _      _   ___ ___
  \ V / _ \| |\/| |  _/\__ \ _| (__| |_| |   / _|| |__ / _ \| _ \__ \
   \_/_/ \_\_|  |_|_|  |___/___\___|\___/|_|_\___|____/_/ \_\___/___/
   by Antonio Hernandez "Belky" — VampSecure Studios
-  vamp-passive-recon v3.0 · Passive Recon + ASM Engine
+  vamp-passive-recon v1.2.0 · Passive Recon + ASM Engine
   ────────────────────────────────────────────────────────────────────────
   USO EXCLUSIVO EN AUDITORÍAS AUTORIZADAS · El uso no autorizado es ilegal
 """
@@ -530,6 +530,178 @@ class LeakIXCollector:
         return result
 
 
+# =============================================================================
+# CORRELACIÓN CVE CON TECNOLOGÍAS DETECTADAS  (v1.2.0)
+# =============================================================================
+
+@dataclass
+class CVEEntry:
+    """CVE correlacionado con una tecnología del stack detectado."""
+    cve_id:    str
+    cvss:      Optional[float]
+    summary:   str
+    published: str
+
+
+@dataclass
+class CVECorrelationResult:
+    """Resultado de la correlación CVE para el stack tecnológico completo."""
+    # Mapa {nombre_tecnología: [CVEEntry]}
+    cves_por_tech:   dict = field(default_factory=dict)
+    # Tecnologías consultadas sin CVEs conocidos
+    techs_sin_datos: list = field(default_factory=list)
+    # Tecnologías sin CPE conocido en el mapa interno (se omiten)
+    techs_omitidas:  list = field(default_factory=list)
+
+
+class CVECorrelator:
+    """
+    Correlaciona CVEs con el stack tecnológico detectado por el módulo ASM.
+
+    Para cada tecnología en tech_stack consulta la API pública de CIRCL
+    (cve.circl.lu/api/search/<vendor>/<product>) mediante urllib.request.
+    No requiere clave API. Timeout: 10 s por consulta.
+
+    Devuelve los top 3 CVEs más críticos (CVSS descendente) por tecnología.
+    Si la API no responde, registra INFO silencioso y continúa.
+    """
+
+    # Mapa de nombres de tecnología (lowercase) → (vendor_cpe, product_cpe)
+    _CPE_MAP: dict = {
+        "nginx":                    ("nginx",             "nginx"),
+        "apache http":              ("apache",            "http_server"),
+        "apache":                   ("apache",            "http_server"),
+        "php":                      ("php",               "php"),
+        "wordpress":                ("wordpress",         "wordpress"),
+        "drupal":                   ("drupal",            "drupal"),
+        "joomla":                   ("joomla",            "joomla"),
+        "microsoft iis":            ("microsoft",         "iis"),
+        "iis":                      ("microsoft",         "iis"),
+        "asp.net":                  ("microsoft",         "asp.net_framework"),
+        "asp.net core/kestrel":     ("microsoft",         "asp.net_core"),
+        "litespeed":                ("litespeedtech",     "litespeed"),
+        "openresty":                ("openresty",         "openresty"),
+        "caddy":                    ("caddyserver",       "caddy"),
+        "varnish cache":            ("varnish-software",  "varnish"),
+        "express.js":               ("expressjs",         "express"),
+        "next.js":                  ("vercel",            "next.js"),
+        "jquery":                   ("jquery",            "jquery"),
+        "openssh":                  ("openbsd",           "openssh"),
+        "openssl":                  ("openssl",           "openssl"),
+        "mysql":                    ("mysql",             "mysql"),
+        "postgresql":               ("postgresql",        "postgresql"),
+        "mongodb":                  ("mongodb",           "mongodb"),
+        "redis":                    ("redis",             "redis"),
+        "elasticsearch":            ("elastic",           "elasticsearch"),
+        "tomcat":                   ("apache",            "tomcat"),
+        "phusion passenger":        ("phusion",           "passenger"),
+        "squid proxy":              ("squid-cache",       "squid"),
+        "aws cloudfront":           ("amazon",            "cloudfront"),
+    }
+
+    _CIRCL_URL = "https://cve.circl.lu/api/search/{vendor}/{product}"
+
+    def correlate(self, tech_stack: list) -> CVECorrelationResult:
+        """
+        Consulta la API CIRCL CVE para cada tecnología del stack detectado.
+        Sincrónico (urllib.request, timeout 10 s).
+
+        Parámetros
+        ----------
+        tech_stack : List[TechEntry]  — stack del módulo ASM
+
+        Retorna
+        -------
+        CVECorrelationResult con los CVEs agrupados por tecnología.
+        """
+        import urllib.request as _ureq
+        import json as _json
+        from urllib.parse import quote as _quote
+
+        result = CVECorrelationResult()
+
+        for tech in tech_stack:
+            if not tech.name:
+                result.techs_omitidas.append("")
+                continue
+
+            name_lower = tech.name.lower().strip()
+
+            # Buscar la clave CPE más específica que coincida
+            cpe_pair = None
+            for key, pair in self._CPE_MAP.items():
+                if key == name_lower or name_lower.startswith(key) or key in name_lower:
+                    cpe_pair = pair
+                    break
+
+            if not cpe_pair:
+                result.techs_omitidas.append(tech.name)
+                continue
+
+            vendor, product = cpe_pair
+            url = self._CIRCL_URL.format(
+                vendor=_quote(vendor, safe=""),
+                product=_quote(product, safe=""),
+            )
+
+            try:
+                req = _ureq.Request(
+                    url,
+                    headers={
+                        "User-Agent": f"{TOOL_NAME}/{VERSION}",
+                        "Accept":     "application/json",
+                    },
+                )
+                with _ureq.urlopen(req, timeout=10) as resp:
+                    if resp.status != 200:
+                        result.techs_sin_datos.append(tech.name)
+                        continue
+                    raw = resp.read()
+                cves_raw = _json.loads(raw)
+            except Exception:
+                # API no disponible o timeout: INFO silencioso, continuar
+                result.techs_sin_datos.append(tech.name)
+                continue
+
+            # Normalizar la respuesta (puede ser lista o dict con clave "results")
+            if isinstance(cves_raw, dict):
+                cves_raw = cves_raw.get("results", [])
+            if not isinstance(cves_raw, list):
+                result.techs_sin_datos.append(tech.name)
+                continue
+
+            if not cves_raw:
+                result.techs_sin_datos.append(tech.name)
+                continue
+
+            def _cvss_val(c: dict) -> float:
+                """Extrae el valor CVSS numérico de un CVE de la API CIRCL."""
+                try:
+                    return float(c.get("cvss") or 0)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            # Ordenar por CVSS descendente y tomar top 3
+            cves_ordenados = sorted(cves_raw, key=_cvss_val, reverse=True)
+            top3 = cves_ordenados[:3]
+
+            entradas = [
+                CVEEntry(
+                    cve_id    = c.get("id", ""),
+                    cvss      = _cvss_val(c) or None,
+                    summary   = (c.get("summary", "") or "")[:200],
+                    published = (c.get("Published", "") or "")[:10],
+                )
+                for c in top3
+                if c.get("id")
+            ]
+
+            if entradas:
+                result.cves_por_tech[tech.name] = entradas
+
+        return result
+
+
 def _load_dotenv() -> None:
     """
     Carga variables de entorno desde .env en el mismo directorio.
@@ -630,6 +802,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--securitytrails", action="store_true",
                    help="Activar fuente SecurityTrails para enumeración de subdominios "
                         "(requiere env SECURITYTRAILS_API_KEY)")
+    p.add_argument("--cve-correlate", action="store_true",
+                   help="Correlacionar CVEs con las tecnologías detectadas en el ASM "
+                        "(Fase 8; consulta API pública cve.circl.lu, sin clave API requerida)")
     p.add_argument("--export-oracle", metavar="FILE",
                    help="Exportar hosts vivos con banners al formato de entrada de "
                         "vamp-cve-oracle (lista JSON con claves host, port, product, version)")
@@ -818,6 +993,50 @@ async def run(args: argparse.Namespace) -> int:
                     f"  [{icon}] {svc.ip}:{svc.port}/{svc.protocol} — {svc.summary[:60]}"
                 )
 
+    # ── Fase 8: Correlación CVE con tecnologías detectadas (opcional) ────────
+    cve_correlation: Optional[CVECorrelationResult] = None
+    if getattr(args, "cve_correlate", False):
+        if asm_result and asm_result.tech_stack:
+            console_local.print("\n[bold]>> Fase 8: correlación CVE — tecnologías del stack detectado[/]\n")
+            correlator = CVECorrelator()
+            with console_local.status(
+                "[cyan]Consultando CIRCL CVE API para el stack detectado…[/]",
+                spinner="dots",
+            ):
+                cve_correlation = correlator.correlate(asm_result.tech_stack)
+
+            if cve_correlation.cves_por_tech:
+                for tech_name, cves in cve_correlation.cves_por_tech.items():
+                    console_local.print(
+                        f"  [cyan]{tech_name}[/] — [bold]{len(cves)}[/] CVE(s) encontrados:"
+                    )
+                    for cve in cves:
+                        cvss_str = f"CVSS {cve.cvss:.1f}" if cve.cvss else "CVSS N/D"
+                        sev_color = (
+                            "red" if (cve.cvss or 0) >= 9.0
+                            else "orange3" if (cve.cvss or 0) >= 7.0
+                            else "yellow"
+                        )
+                        console_local.print(
+                            f"    [{sev_color}]{cve.cve_id}[/] {cvss_str} "
+                            f"({cve.published}) — {cve.summary[:80]}…"
+                        )
+            else:
+                console_local.print(
+                    "[dim]  Sin datos CVE para las tecnologías detectadas "
+                    "(la API CIRCL no devolvió resultados o no hay CPE conocido para el stack).[/]"
+                )
+            if cve_correlation.techs_sin_datos:
+                console_local.print(
+                    f"[dim]  Sin CVEs en CIRCL para: "
+                    f"{', '.join(cve_correlation.techs_sin_datos[:5])}[/]"
+                )
+        else:
+            console_local.print(
+                "[yellow]  --cve-correlate activo pero sin tech_stack detectado "
+                "(ejecutar sin --no-asm para que el ASM detecte tecnologías).[/]"
+            )
+
     # ── Export oracle (formato de entrada para vamp-cve-oracle) ─────────────
     if getattr(args, "export_oracle", None):
         oracle_data = _build_oracle_export(subs, header_reports, asm_result, shodan_result)
@@ -857,7 +1076,8 @@ async def run(args: argparse.Namespace) -> int:
         meta    = meta_from_args(args, tool=TOOL_NAME, version=VERSION)
         vsl_rep = VampSecReport(meta, _findings_vsl(args.domain, subs, header_reports, asm_result,
                                                      shodan=shodan_result,
-                                                     vt=vt_result, leakix=leakix_result))
+                                                     vt=vt_result, leakix=leakix_result,
+                                                     cve_corr=cve_correlation))
         if args.report_html:
             vsl_rep.to_html_client(args.report_html)
             console_local.print(f"[green]✔[/] Informe cliente HTML: {args.report_html}")
@@ -962,7 +1182,7 @@ def main() -> None:
 # =============================================================================
 
 def _findings_vsl(domain: str, subs: set, header_reports: dict, asm_result,
-                  shodan=None, vt=None, leakix=None) -> list:
+                  shodan=None, vt=None, leakix=None, cve_corr=None) -> list:
     """
     Convierte los resultados de vamp-passive-recon al formato Finding de vampsec_report.
 
@@ -1191,6 +1411,44 @@ def _findings_vsl(domain: str, subs: set, header_reports: dict, asm_result,
                 ),
                 tags        = ["virustotal", "malicious-subdomain", "threat-intel"],
             ))
+
+    # ── Hallazgos CVE correlacionados con tecnologías detectadas ──
+    if cve_corr and cve_corr.cves_por_tech:
+        for tech_name, cves in cve_corr.cves_por_tech.items():
+            for cve in cves[:2]:   # Máximo 2 CVEs por tecnología en el informe
+                cvss_val = cve.cvss or 0.0
+                if cvss_val < 7.0:
+                    continue   # Solo incluir CVSS >= 7.0 en el informe de cliente
+                n += 1
+                severidad = "CRITICAL" if cvss_val >= 9.0 else "HIGH"
+                findings.append(VSLFinding(
+                    id          = f"RECON-{n:03d}",
+                    title       = (
+                        f"CVE en tecnología detectada: {cve.cve_id} ({tech_name})"
+                    )[:80],
+                    severity    = severidad,
+                    description = (
+                        f"La tecnología {tech_name} detectada en hosts de {domain} "
+                        f"tiene asociado el CVE {cve.cve_id} con CVSS {cvss_val:.1f}. "
+                        f"{cve.summary[:150]}"
+                    ),
+                    evidence    = (
+                        f"Tecnología detectada: {tech_name}\n"
+                        f"CVE: {cve.cve_id}\n"
+                        f"CVSS: {cvss_val:.1f}\n"
+                        f"Publicado: {cve.published}\n"
+                        f"Fuente: CIRCL CVE (cve.circl.lu) — verificar versión instalada"
+                    ),
+                    affected    = domain,
+                    remediation = (
+                        f"Verificar si la versión de {tech_name} instalada en los hosts de {domain} "
+                        f"está afectada por {cve.cve_id}. "
+                        "Actualizar a la versión parcheada según las instrucciones del fabricante. "
+                        f"Referencia: https://nvd.nist.gov/vuln/detail/{cve.cve_id}"
+                    ),
+                    cve         = cve.cve_id,
+                    tags        = ["cve", "tech-stack", "passive-recon"],
+                ))
 
     return findings
 
