@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# © VampSecure Studios — VampSecure Labs Security Research Division
 """
 vamp_passive_recon.py — Motor de Reconocimiento Pasivo y ASM
 =============================================================
@@ -78,18 +79,18 @@ from headers import HeaderAnalyzer
 from reporter import Reporter
 
 
-VERSION   = "1.2.0"
+VERSION   = "1.3.0"
 TOOL_NAME = "vamp-passive-recon"
 
 console = Console()
 
 BANNER = r"""
-__   ___   __  __ ___  ___ ___ ___ _   _ ___ ___ _      _   ___ ___ 
+__   ___   __  __ ___  ___ ___ ___ _   _ ___ ___ _      _   ___ ___
 \ \ / /_\ |  \/  | _ \/ __| __/ __| | | | _ \ __| |    /_\ | _ ) __|
  \ V / _ \| |\/| |  _/\__ \ _| (__| |_| |   / _|| |__ / _ \| _ \__ \
   \_/_/ \_\_|  |_|_|  |___/___\___|\___/|_|_\___|____/_/ \_\___/___/
   by Antonio Hernandez "Belky" — VampSecure Studios
-  vamp-passive-recon v1.2.0 · Passive Recon + ASM Engine
+  vamp-passive-recon v1.3.0 · Passive Recon + ASM Engine + People Enum
   ────────────────────────────────────────────────────────────────────────
   USO EXCLUSIVO EN AUDITORÍAS AUTORIZADAS · El uso no autorizado es ilegal
 """
@@ -702,6 +703,332 @@ class CVECorrelator:
         return result
 
 
+# =============================================================================
+# ENUMERACIÓN DE PERSONAS Y EMAILS  (v1.3.0)
+# =============================================================================
+
+@dataclass
+class PersonaEncontrada:
+    """Persona o empleado encontrado durante la enumeración."""
+    nombre:  str
+    email:   str = ""
+    perfil:  str = ""      # URL al perfil (LinkedIn, GitHub, etc.)
+    fuente:  str = ""      # Nombre de la fuente que lo descubrió
+
+
+@dataclass
+class ResultadoPeopleEnum:
+    """Resultado agregado de la enumeración de personas para un dominio."""
+    domain:   str
+    personas: list = field(default_factory=list)   # List[PersonaEncontrada]
+    emails:   list = field(default_factory=list)   # List[str] — emails únicos encontrados
+    error:    Optional[str] = None
+
+
+class PeopleEnumerator:
+    """
+    Enumeración de personas y emails asociados a un dominio.
+
+    Fuentes utilizadas (sin API key cuando es posible):
+      1. Hunter.io — búsqueda de emails y personas del dominio
+         (requiere --hunter-key para la API; sin key intenta el endpoint libre)
+      2. GitHub API — usuarios con email del dominio en perfil público
+         (gratuito, GITHUB_TOKEN mejora el rate limit)
+      3. Crossref/ORCID — autores académicos con afiliación al dominio
+         (gratuito, sin autenticación)
+      4. Google (via requests) — búsqueda web de perfiles LinkedIn del dominio
+         (sin API, puede ser bloqueado por captcha)
+
+    Los emails descubiertos se reportan como hallazgo EMPLOYEE_EMAILS_EXPOSED
+    si se encuentran más de 0.
+    """
+
+    # Dominio base de Hunter.io para la búsqueda de emails
+    _HUNTER_API_URL = "https://api.hunter.io/v2/domain-search"
+
+    # GitHub API para búsqueda de usuarios
+    _GITHUB_USERS_URL = "https://api.github.com/search/users"
+
+    # Crossref para búsqueda de autores académicos
+    _CROSSREF_URL = "https://api.crossref.org/works"
+
+    def __init__(self, hunter_key: str = "", github_token: str = "") -> None:
+        self._hunter_key   = hunter_key
+        self._github_token = github_token or os.environ.get("GITHUB_TOKEN", "")
+
+    async def enumerate(self, domain: str) -> ResultadoPeopleEnum:
+        """
+        Ejecuta la enumeración de personas para el dominio dado.
+        Combina resultados de todas las fuentes disponibles.
+        """
+        result = ResultadoPeopleEnum(domain=domain)
+        personas_vistas: set = set()   # para deduplicar por nombre+email
+
+        # Fuente 1: Hunter.io
+        if self._hunter_key:
+            await self._from_hunter(domain, result, personas_vistas)
+        else:
+            # Sin key: intentar scraping básico de Hunter (puede fallar)
+            await self._from_hunter_free(domain, result, personas_vistas)
+
+        # Fuente 2: GitHub API
+        await self._from_github(domain, result, personas_vistas)
+
+        # Fuente 3: Crossref / autores académicos
+        await self._from_crossref(domain, result, personas_vistas)
+
+        # Fuente 4: búsqueda web LinkedIn (sin API)
+        await self._from_linkedin_web(domain, result, personas_vistas)
+
+        # Deduplicar emails
+        emails_set: set = set()
+        for p in result.personas:
+            if p.email:
+                emails_set.add(p.email.lower())
+        result.emails = sorted(emails_set)
+
+        return result
+
+    async def _from_hunter(
+        self, domain: str, result: ResultadoPeopleEnum, vistos: set
+    ) -> None:
+        """
+        Consulta Hunter.io con clave API para obtener emails y personas del dominio.
+        """
+        import aiohttp as _aiohttp
+        params = {"domain": domain, "api_key": self._hunter_key, "limit": "100"}
+        try:
+            async with _aiohttp.ClientSession() as sess:
+                async with sess.get(
+                    self._HUNTER_API_URL, params=params, timeout=15, ssl=True
+                ) as resp:
+                    if resp.status != 200:
+                        return
+                    data = await resp.json(content_type=None)
+
+            for entry in data.get("data", {}).get("emails", []):
+                nombre = (
+                    (entry.get("first_name") or "") + " " +
+                    (entry.get("last_name") or "")
+                ).strip()
+                email = entry.get("value", "")
+                key   = (nombre.lower(), email.lower())
+                if key not in vistos:
+                    vistos.add(key)
+                    result.personas.append(PersonaEncontrada(
+                        nombre = nombre or email.split("@")[0],
+                        email  = email,
+                        perfil = entry.get("linkedin", ""),
+                        fuente = "Hunter.io (API)",
+                    ))
+        except Exception:
+            pass
+
+    async def _from_hunter_free(
+        self, domain: str, result: ResultadoPeopleEnum, vistos: set
+    ) -> None:
+        """
+        Intenta obtener información básica de Hunter.io sin API key.
+        El endpoint público es limitado y puede requerir JavaScript.
+        """
+        import aiohttp as _aiohttp
+        import re as _re
+        url = f"https://hunter.io/email-finder/{domain}"
+        try:
+            hdrs = {"User-Agent": f"{TOOL_NAME}/{VERSION}", "Accept": "text/html"}
+            async with _aiohttp.ClientSession(headers=hdrs) as sess:
+                async with sess.get(url, timeout=10, ssl=True) as resp:
+                    if resp.status != 200:
+                        return
+                    texto = await resp.text()
+
+            # Buscar emails del dominio en el HTML (básico, sin garantías)
+            patron = rf"[a-z0-9._%+\-]+@{re.escape(domain)}"
+            for email in _re.findall(patron, texto, flags=_re.IGNORECASE):
+                email = email.lower()
+                key = ("", email)
+                if key not in vistos:
+                    vistos.add(key)
+                    result.personas.append(PersonaEncontrada(
+                        nombre = email.split("@")[0],
+                        email  = email,
+                        fuente = "Hunter.io (sin clave, básico)",
+                    ))
+        except Exception:
+            pass
+
+    async def _from_github(
+        self, domain: str, result: ResultadoPeopleEnum, vistos: set
+    ) -> None:
+        """
+        Busca usuarios de GitHub con email del dominio en su perfil público.
+        Usa la API de búsqueda de GitHub (gratuita; GITHUB_TOKEN mejora el rate limit).
+        """
+        import aiohttp as _aiohttp
+        hdrs: dict = {
+            "User-Agent": f"{TOOL_NAME}/{VERSION}",
+            "Accept":     "application/vnd.github+json",
+        }
+        if self._github_token:
+            hdrs["Authorization"] = f"token {self._github_token}"
+
+        params = {"q": domain, "per_page": "30"}
+        try:
+            async with _aiohttp.ClientSession(headers=hdrs) as sess:
+                async with sess.get(
+                    self._GITHUB_USERS_URL, params=params, timeout=15, ssl=True
+                ) as resp:
+                    if resp.status not in (200, 206):
+                        return
+                    data = await resp.json(content_type=None)
+
+            for item in data.get("items", []):
+                login  = item.get("login", "")
+                nombre = item.get("name", login)
+                email  = item.get("email", "")
+                perfil = item.get("html_url", "")
+                # Filtrar solo usuarios cuyo email corresponde al dominio
+                if email and not email.lower().endswith(f"@{domain.lower()}"):
+                    email = ""
+                key = (nombre.lower(), email.lower())
+                if key not in vistos:
+                    vistos.add(key)
+                    result.personas.append(PersonaEncontrada(
+                        nombre = nombre or login,
+                        email  = email,
+                        perfil = perfil,
+                        fuente = "GitHub API",
+                    ))
+        except Exception:
+            pass
+
+    async def _from_crossref(
+        self, domain: str, result: ResultadoPeopleEnum, vistos: set
+    ) -> None:
+        """
+        Busca publicaciones académicas que contengan el dominio para descubrir
+        autores con afiliación a la organización objetivo.
+        Usa la API pública de Crossref (sin autenticación requerida).
+        """
+        import aiohttp as _aiohttp
+        params = {
+            "query.affiliation": domain,
+            "rows":              "20",
+            "select":            "author",
+        }
+        try:
+            async with _aiohttp.ClientSession() as sess:
+                async with sess.get(
+                    self._CROSSREF_URL, params=params, timeout=15, ssl=True
+                ) as resp:
+                    if resp.status != 200:
+                        return
+                    data = await resp.json(content_type=None)
+
+            for item in data.get("message", {}).get("items", []):
+                for autor in item.get("author", []):
+                    nombre = (
+                        (autor.get("given", "") + " " + autor.get("family", "")).strip()
+                    )
+                    if not nombre:
+                        continue
+                    # Buscar email en los campos ORCID / affiliation (rara vez disponible)
+                    orcid  = autor.get("ORCID", "")
+                    key    = (nombre.lower(), "")
+                    if key not in vistos:
+                        vistos.add(key)
+                        result.personas.append(PersonaEncontrada(
+                            nombre = nombre,
+                            perfil = orcid,
+                            fuente = "Crossref/ORCID",
+                        ))
+        except Exception:
+            pass
+
+    async def _from_linkedin_web(
+        self, domain: str, result: ResultadoPeopleEnum, vistos: set
+    ) -> None:
+        """
+        Búsqueda básica de perfiles LinkedIn del dominio mediante búsqueda web.
+        Usa una búsqueda Google del tipo: site:linkedin.com/in "<domain>"
+
+        Sin API de LinkedIn ni Google → puede ser bloqueado por captcha.
+        Solo extrae nombres de URLs de LinkedIn del HTML de resultados.
+        """
+        import aiohttp as _aiohttp
+        import re as _re
+
+        query = f'site:linkedin.com/in "{domain}"'
+        # Usar DuckDuckGo HTML como alternativa menos restrictiva que Google
+        url   = "https://html.duckduckgo.com/html/"
+        hdrs  = {
+            "User-Agent": (
+                "Mozilla/5.0 (compatible; VampSecureLabs-Recon/"
+                f"{VERSION}; +https://vampsecurestudios.com)"
+            ),
+            "Accept-Language": "es,en;q=0.9",
+        }
+        try:
+            async with _aiohttp.ClientSession(headers=hdrs) as sess:
+                async with sess.post(
+                    url, data={"q": query}, timeout=15, ssl=True
+                ) as resp:
+                    if resp.status != 200:
+                        return
+                    texto = await resp.text()
+
+            # Extraer URLs de LinkedIn y el nombre del slug
+            for match in _re.finditer(
+                r"linkedin\.com/in/([a-z0-9\-]+)", texto, flags=_re.IGNORECASE
+            ):
+                slug   = match.group(1)
+                nombre = slug.replace("-", " ").title()
+                key    = (nombre.lower(), "")
+                if key not in vistos:
+                    vistos.add(key)
+                    result.personas.append(PersonaEncontrada(
+                        nombre = nombre,
+                        perfil = f"https://www.linkedin.com/in/{slug}",
+                        fuente = "LinkedIn (búsqueda web)",
+                    ))
+        except Exception:
+            pass
+
+
+def _imprimir_personas(result: ResultadoPeopleEnum) -> None:
+    """
+    Muestra en consola un resumen de las personas y emails encontrados.
+    """
+    if not result.personas:
+        console.print("[yellow]  No se encontraron personas o emails para el dominio.[/]")
+        return
+
+    from rich.table import Table as _Table
+
+    tabla = _Table(
+        title=f"Personas y emails — {result.domain}",
+        show_header=True,
+        header_style="bold cyan",
+        border_style="bright_black",
+    )
+    tabla.add_column("Nombre",  style="white", max_width=30)
+    tabla.add_column("Email",   style="yellow", max_width=35)
+    tabla.add_column("Perfil",  style="blue",   max_width=50)
+    tabla.add_column("Fuente",  style="dim",    max_width=25)
+
+    for p in result.personas[:50]:
+        tabla.add_row(p.nombre, p.email or "—", p.perfil or "—", p.fuente)
+
+    console.print(tabla)
+
+    if result.emails:
+        console.print(
+            f"\n[bold green]  {len(result.emails)} email(s) únicos encontrados:[/]"
+        )
+        for email in result.emails:
+            console.print(f"    · {email}")
+
+
 def _load_dotenv() -> None:
     """
     Carga variables de entorno desde .env en el mismo directorio.
@@ -805,6 +1132,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cve-correlate", action="store_true",
                    help="Correlacionar CVEs con las tecnologías detectadas en el ASM "
                         "(Fase 8; consulta API pública cve.circl.lu, sin clave API requerida)")
+
+    # Enumeración de personas y emails  (v1.3.0)
+    p.add_argument("--enumerate-people", action="store_true",
+                   dest="enumerate_people",
+                   help=(
+                       "Activar módulo de enumeración de personas y emails del dominio "
+                       "(Fase 9). Fuentes: Hunter.io, GitHub API, Crossref/ORCID, LinkedIn web. "
+                       "Los emails encontrados se reportan como EMPLOYEE_EMAILS_EXPOSED."
+                   ))
+    p.add_argument("--hunter-key", metavar="API_KEY",
+                   dest="hunter_key", default="",
+                   help="API key de Hunter.io para búsqueda de emails (tier gratuito disponible). "
+                        "Sin key se intenta scraping básico del sitio (puede fallar).")
+
     p.add_argument("--export-oracle", metavar="FILE",
                    help="Exportar hosts vivos con banners al formato de entrada de "
                         "vamp-cve-oracle (lista JSON con claves host, port, product, version)")
@@ -1037,6 +1378,29 @@ async def run(args: argparse.Namespace) -> int:
                 "(ejecutar sin --no-asm para que el ASM detecte tecnologías).[/]"
             )
 
+    # ── Fase 9: Enumeración de personas y emails (v1.3.0) ────────────────────
+    people_result = None
+    if getattr(args, "enumerate_people", False):
+        console_local.print("\n[bold]>> Fase 9: enumeración de personas y emails[/]\n")
+        hunter_key   = getattr(args, "hunter_key", "") or os.environ.get("HUNTER_API_KEY", "")
+        people_enum  = PeopleEnumerator(
+            hunter_key=hunter_key,
+            github_token=os.environ.get("GITHUB_TOKEN", ""),
+        )
+        with console_local.status(
+            "[cyan]Enumerando personas: Hunter.io · GitHub · Crossref · LinkedIn…[/]",
+            spinner="dots",
+        ):
+            people_result = await people_enum.enumerate(args.domain)
+
+        _imprimir_personas(people_result)
+
+        if people_result.emails:
+            console_local.print(
+                f"\n[bold red]  ⚠ EMPLOYEE_EMAILS_EXPOSED:[/] "
+                f"{len(people_result.emails)} email(s) del dominio expuestos públicamente."
+            )
+
     # ── Export oracle (formato de entrada para vamp-cve-oracle) ─────────────
     if getattr(args, "export_oracle", None):
         oracle_data = _build_oracle_export(subs, header_reports, asm_result, shodan_result)
@@ -1077,7 +1441,8 @@ async def run(args: argparse.Namespace) -> int:
         vsl_rep = VampSecReport(meta, _findings_vsl(args.domain, subs, header_reports, asm_result,
                                                      shodan=shodan_result,
                                                      vt=vt_result, leakix=leakix_result,
-                                                     cve_corr=cve_correlation))
+                                                     cve_corr=cve_correlation,
+                                                     people=people_result))
         if args.report_html:
             vsl_rep.to_html_client(args.report_html)
             console_local.print(f"[green]✔[/] Informe cliente HTML: {args.report_html}")
@@ -1182,7 +1547,8 @@ def main() -> None:
 # =============================================================================
 
 def _findings_vsl(domain: str, subs: set, header_reports: dict, asm_result,
-                  shodan=None, vt=None, leakix=None, cve_corr=None) -> list:
+                  shodan=None, vt=None, leakix=None, cve_corr=None,
+                  people=None) -> list:
     """
     Convierte los resultados de vamp-passive-recon al formato Finding de vampsec_report.
 
@@ -1449,6 +1815,45 @@ def _findings_vsl(domain: str, subs: set, header_reports: dict, asm_result,
                     cve         = cve.cve_id,
                     tags        = ["cve", "tech-stack", "passive-recon"],
                 ))
+
+    # ── Hallazgo EMPLOYEE_EMAILS_EXPOSED (v1.3.0) ──
+    if people and people.emails:
+        n += 1
+        lista_emails = "\n".join(f"  · {e}" for e in people.emails[:30])
+        personas_con_nombre = [
+            p for p in people.personas if p.nombre and p.nombre != p.email.split("@")[0]
+        ]
+        resumen_personas = "\n".join(
+            f"  · {p.nombre}{(' <' + p.email + '>') if p.email else ''} ({p.fuente})"
+            for p in personas_con_nombre[:20]
+        )
+
+        findings.append(VSLFinding(
+            id          = f"RECON-{n:03d}",
+            title       = (
+                f"EMPLOYEE_EMAILS_EXPOSED: {len(people.emails)} email(s) "
+                f"corporativos expuestos en fuentes públicas"
+            )[:80],
+            severity    = "HIGH",
+            description = (
+                f"Se han encontrado {len(people.emails)} dirección(es) de email del dominio "
+                f"{domain} en fuentes públicas (Hunter.io, GitHub, Crossref/ORCID, LinkedIn). "
+                "Esta información puede ser utilizada en ataques de phishing dirigido (spear-phishing), "
+                "password spraying o ingeniería social."
+            ),
+            evidence    = (
+                f"Emails encontrados ({len(people.emails)}):\n{lista_emails}\n\n"
+                + (f"Personas identificadas:\n{resumen_personas}" if resumen_personas else "")
+            ),
+            affected    = domain,
+            remediation = (
+                "Revisar la política de exposición de emails corporativos. "
+                "Implementar protección antiphishing (DMARC, SPF, DKIM) si no está activa. "
+                "Activar MFA en todas las cuentas identificadas. "
+                "Considerar el uso de alias de email para reducir la superficie de exposición."
+            ),
+            tags        = ["people-enum", "email-exposure", "osint"],
+        ))
 
     return findings
 
