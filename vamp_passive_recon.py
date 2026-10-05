@@ -64,20 +64,23 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from rich.console import Console
 from rich.panel import Panel
 
 from asm import ASMAnalyzer
-from sources import (
-    SubdomainEnumerator, DEFAULT_SOURCES,
-    Censys as _CensysSource,
-    SecurityTrails as _SecurityTrailsSource,
-)
 from headers import HeaderAnalyzer
 from reporter import Reporter
-
+from sources import (
+    DEFAULT_SOURCES,
+    SubdomainEnumerator,
+)
+from sources import (
+    Censys as _CensysSource,
+)
+from sources import (
+    SecurityTrails as _SecurityTrailsSource,
+)
 
 VERSION   = "1.3.0"
 TOOL_NAME = "vamp-passive-recon"
@@ -130,7 +133,7 @@ class ShodanResult:
     total_hosts: int  = 0
     all_ports:   list = field(default_factory=list)   # List[int] — únicos
     all_vulns:   list = field(default_factory=list)   # List[str] — CVE IDs únicos
-    error:       Optional[str] = None
+    error:       str | None = None
 
 
 class ShodanEnricher:
@@ -242,7 +245,7 @@ class ShodanEnricher:
             host.services.append(svc)
 
             # CVEs reportados por Shodan
-            for cve_id in (match.get("vulns") or {}).keys():
+            for cve_id in (match.get("vulns") or {}):
                 if cve_id not in host.vulns:
                     host.vulns.append(cve_id)
 
@@ -280,7 +283,7 @@ class CensysResult:
     hosts:       list = field(default_factory=list)
     total_hosts: int  = 0
     all_ports:   list = field(default_factory=list)
-    error:       Optional[str] = None
+    error:       str | None = None
 
 
 class CensysCollector:
@@ -379,7 +382,7 @@ class VTResult:
     """Resultado de consulta VirusTotal para un dominio."""
     domain:     str
     subdomains: list = field(default_factory=list)
-    error:      Optional[str] = None
+    error:      str | None = None
 
 
 class VirusTotalCollector:
@@ -462,7 +465,7 @@ class LeakIXResult:
     domain:   str
     services: list = field(default_factory=list)
     leaks:    int  = 0
-    error:    Optional[str] = None
+    error:    str | None = None
 
 
 class LeakIXCollector:
@@ -539,7 +542,7 @@ class LeakIXCollector:
 class CVEEntry:
     """CVE correlacionado con una tecnología del stack detectado."""
     cve_id:    str
-    cvss:      Optional[float]
+    cvss:      float | None
     summary:   str
     published: str
 
@@ -615,8 +618,8 @@ class CVECorrelator:
         -------
         CVECorrelationResult con los CVEs agrupados por tecnología.
         """
-        import urllib.request as _ureq
         import json as _json
+        import urllib.request as _ureq
         from urllib.parse import quote as _quote
 
         result = CVECorrelationResult()
@@ -722,7 +725,7 @@ class ResultadoPeopleEnum:
     domain:   str
     personas: list = field(default_factory=list)   # List[PersonaEncontrada]
     emails:   list = field(default_factory=list)   # List[str] — emails únicos encontrados
-    error:    Optional[str] = None
+    error:    str | None = None
 
 
 class PeopleEnumerator:
@@ -798,13 +801,12 @@ class PeopleEnumerator:
         import aiohttp as _aiohttp
         params = {"domain": domain, "api_key": self._hunter_key, "limit": "100"}
         try:
-            async with _aiohttp.ClientSession() as sess:
-                async with sess.get(
-                    self._HUNTER_API_URL, params=params, timeout=15, ssl=True
-                ) as resp:
-                    if resp.status != 200:
-                        return
-                    data = await resp.json(content_type=None)
+            async with _aiohttp.ClientSession() as sess, sess.get(
+                self._HUNTER_API_URL, params=params, timeout=15, ssl=True
+            ) as resp:
+                if resp.status != 200:
+                    return
+                data = await resp.json(content_type=None)
 
             for entry in data.get("data", {}).get("emails", []):
                 nombre = (
@@ -831,8 +833,9 @@ class PeopleEnumerator:
         Intenta obtener información básica de Hunter.io sin API key.
         El endpoint público es limitado y puede requerir JavaScript.
         """
-        import aiohttp as _aiohttp
         import re as _re
+
+        import aiohttp as _aiohttp
         url = f"https://hunter.io/email-finder/{domain}"
         try:
             hdrs = {"User-Agent": f"{TOOL_NAME}/{VERSION}", "Accept": "text/html"}
@@ -843,7 +846,7 @@ class PeopleEnumerator:
                     texto = await resp.text()
 
             # Buscar emails del dominio en el HTML (básico, sin garantías)
-            patron = rf"[a-z0-9._%+\-]+@{re.escape(domain)}"
+            patron = rf"[a-z0-9._%+\-]+@{_re.escape(domain)}"
             for email in _re.findall(patron, texto, flags=_re.IGNORECASE):
                 email = email.lower()
                 key = ("", email)
@@ -917,13 +920,12 @@ class PeopleEnumerator:
             "select":            "author",
         }
         try:
-            async with _aiohttp.ClientSession() as sess:
-                async with sess.get(
-                    self._CROSSREF_URL, params=params, timeout=15, ssl=True
-                ) as resp:
-                    if resp.status != 200:
-                        return
-                    data = await resp.json(content_type=None)
+            async with _aiohttp.ClientSession() as sess, sess.get(
+                self._CROSSREF_URL, params=params, timeout=15, ssl=True
+            ) as resp:
+                if resp.status != 200:
+                    return
+                data = await resp.json(content_type=None)
 
             for item in data.get("message", {}).get("items", []):
                 for autor in item.get("author", []):
@@ -955,8 +957,9 @@ class PeopleEnumerator:
         Sin API de LinkedIn ni Google → puede ser bloqueado por captcha.
         Solo extrae nombres de URLs de LinkedIn del HTML de resultados.
         """
-        import aiohttp as _aiohttp
         import re as _re
+
+        import aiohttp as _aiohttp
 
         query = f'site:linkedin.com/in "{domain}"'
         # Usar DuckDuckGo HTML como alternativa menos restrictiva que Google
@@ -1335,7 +1338,7 @@ async def run(args: argparse.Namespace) -> int:
                 )
 
     # ── Fase 8: Correlación CVE con tecnologías detectadas (opcional) ────────
-    cve_correlation: Optional[CVECorrelationResult] = None
+    cve_correlation: CVECorrelationResult | None = None
     if getattr(args, "cve_correlate", False):
         if asm_result and asm_result.tech_stack:
             console_local.print("\n[bold]>> Fase 8: correlación CVE — tecnologías del stack detectado[/]\n")

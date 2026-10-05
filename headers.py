@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
 from urllib.parse import quote_plus
 
 import aiohttp
@@ -74,8 +73,8 @@ class HeaderReport:
     source: str              # "urlscan.io" | "wayback"
     status: int | None
     observed_at: str | None
-    headers: Dict[str, str]
-    findings: List[Finding] = field(default_factory=list)
+    headers: dict[str, str]
+    findings: list[Finding] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -85,9 +84,9 @@ class HeaderReport:
 _VERSION_RE = re.compile(r"\d+(?:\.\d+)+")
 
 
-def analyze_headers(headers: Dict[str, str]) -> List[Finding]:
+def analyze_headers(headers: dict[str, str]) -> list[Finding]:
     """Aplica las reglas de análisis sobre un diccionario de cabeceras."""
-    findings: List[Finding] = []
+    findings: list[Finding] = []
     lower = {k.lower(): v for k, v in headers.items()}
 
     # 1) Cabeceras con fuga de información
@@ -185,9 +184,9 @@ class UrlScanFetcher:
         session: aiohttp.ClientSession,
         host: str,
         max_scans: int = 1,
-    ) -> List[HeaderReport]:
+    ) -> list[HeaderReport]:
         search = f"https://urlscan.io/api/v1/search/?q=domain%3A{quote_plus(host)}&size=5"
-        reports: List[HeaderReport] = []
+        reports: list[HeaderReport] = []
         try:
             async with session.get(search, timeout=DEFAULT_TIMEOUT) as r:
                 if r.status != 200:
@@ -238,13 +237,13 @@ class WaybackFetcher:
         session: aiohttp.ClientSession,
         host: str,
         max_snapshots: int = 1,
-    ) -> List[HeaderReport]:
+    ) -> list[HeaderReport]:
         # CDX devuelve los snapshots más recientes con código 200
         cdx = (
             "https://web.archive.org/cdx/search/cdx"
             f"?url={quote_plus(host)}&output=json&limit=-{max_snapshots}&filter=statuscode:200"
         )
-        reports: List[HeaderReport] = []
+        reports: list[HeaderReport] = []
         try:
             async with session.get(cdx, timeout=DEFAULT_TIMEOUT) as r:
                 if r.status != 200:
@@ -295,20 +294,20 @@ class HeaderAnalyzer:
 
     async def analyze_hosts(
         self,
-        hosts: List[str],
+        hosts: list[str],
         max_per_host: int = 1,
         concurrency: int = 5,
-    ) -> Dict[str, List[HeaderReport]]:
+    ) -> dict[str, list[HeaderReport]]:
         headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
         connector = aiohttp.TCPConnector(limit=concurrency, ssl=True)
         sem = asyncio.Semaphore(concurrency)
-        result: Dict[str, List[HeaderReport]] = {}
+        result: dict[str, list[HeaderReport]] = {}
 
         async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
 
             async def work(h: str):
                 async with sem:
-                    host_reports: List[HeaderReport] = []
+                    host_reports: list[HeaderReport] = []
                     for f in self.fetchers:
                         try:
                             host_reports.extend(await f.collect(session, h, max_per_host))

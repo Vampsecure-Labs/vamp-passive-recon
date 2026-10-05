@@ -15,7 +15,7 @@ import os
 import random
 import re
 from dataclasses import dataclass, field
-from typing import Iterable, Set
+from typing import Iterable
 from urllib.parse import quote_plus
 
 import aiohttp
@@ -90,7 +90,7 @@ def _clean(host: str, apex: str) -> str | None:
 class SourceResult:
     """Resultado devuelto por una fuente individual."""
     name: str
-    subdomains: Set[str] = field(default_factory=set)
+    subdomains: set[str] = field(default_factory=set)
     error: str | None = None
 
     @property
@@ -459,7 +459,7 @@ class SubdomainEnumerator:
     def __init__(self, sources: Iterable[type[PassiveSource]] | None = None):
         self.sources = [s() for s in (sources or DEFAULT_SOURCES)]
 
-    async def enumerate(self, domain: str) -> tuple[Set[str], list[SourceResult]]:
+    async def enumerate(self, domain: str) -> tuple[set[str], list[SourceResult]]:
         domain = domain.lower().strip().rstrip(".")
         headers = {"User-Agent": USER_AGENT, "Accept": "application/json, text/plain, */*"}
         connector = aiohttp.TCPConnector(limit=10, ssl=True)
@@ -467,7 +467,7 @@ class SubdomainEnumerator:
             tasks = [s.fetch(session, domain) for s in self.sources]
             results = await asyncio.gather(*tasks, return_exceptions=False)
 
-        all_subs: Set[str] = set()
+        all_subs: set[str] = set()
         for r in results:
             all_subs.update(r.subdomains)
         return all_subs, results

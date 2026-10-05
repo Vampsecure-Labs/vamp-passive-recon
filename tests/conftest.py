@@ -1,9 +1,10 @@
 # © VampSecure Studios — VampSecure Labs Security Research Division
 """Fixtures compartidas para los tests de vamp-passive-recon."""
 
-import pytest
-import sys
 import os
+import sys
+
+import pytest
 
 # Añadir el directorio raíz de la herramienta al path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

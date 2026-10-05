@@ -1,10 +1,9 @@
 # © VampSecure Studios — VampSecure Labs Security Research Division
 """Tests unitarios para vamp-passive-recon."""
 
-import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
-import sys
 import os
+import sys
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -19,7 +18,6 @@ with patch.dict("sys.modules", {
     "rich.console": MagicMock(),
     "rich.panel": MagicMock(),
 }):
-    import importlib
     import vamp_passive_recon as vpr
 
 
@@ -69,7 +67,7 @@ class TestShodanEnricher:
 
     def test_parseo_matches_con_ips_unicas(self, respuesta_shodan_valida):
         """Los matches con IPs duplicadas deben fusionarse en un único host."""
-        enricher = vpr.ShodanEnricher("clave-test")
+        vpr.ShodanEnricher("clave-test")
         result = vpr.ShodanResult(domain="ejemplo.com")
         # Simular la lógica de _search_hosts sin red
         seen_ips = {}
@@ -92,8 +90,8 @@ class TestShodanEnricher:
 
     def test_parseo_acumula_puertos_por_ip(self, respuesta_shodan_valida):
         """Una misma IP con varios matches debe acumular todos sus puertos."""
-        enricher = vpr.ShodanEnricher("clave-test")
-        result = vpr.ShodanResult(domain="ejemplo.com")
+        vpr.ShodanEnricher("clave-test")
+        vpr.ShodanResult(domain="ejemplo.com")
         seen_ips = {}
         for match in respuesta_shodan_valida["matches"]:
             ip = match.get("ip_str", "")
@@ -122,7 +120,7 @@ class TestShodanEnricher:
             if ip not in seen_ips:
                 seen_ips[ip] = vpr.ShodanHostResult(ip=ip)
             host = seen_ips[ip]
-            for cve_id in (match.get("vulns") or {}).keys():
+            for cve_id in (match.get("vulns") or {}):
                 if cve_id not in host.vulns:
                     host.vulns.append(cve_id)
         all_vulns: set = set()

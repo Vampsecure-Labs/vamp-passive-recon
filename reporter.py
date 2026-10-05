@@ -9,18 +9,15 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 from datetime import datetime
-from pathlib import Path
-from typing import Dict, List, Optional, Set
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.tree import Tree
 
-from asm import ASMResult, GitHubFinding
+from asm import ASMResult
 from headers import HeaderReport
 from sources import SourceResult
-
 
 SEVERITY_STYLE = {
     "info":   "cyan",
@@ -40,7 +37,7 @@ class Reporter:
     # Consola
     # ------------------------------------------------------------------
 
-    def print_source_summary(self, source_results: List[SourceResult]) -> None:
+    def print_source_summary(self, source_results: list[SourceResult]) -> None:
         table = Table(title="Fuentes pasivas consultadas", show_lines=False)
         table.add_column("Fuente")
         table.add_column("Estado")
@@ -50,13 +47,13 @@ class Reporter:
             table.add_row(r.name, status, str(len(r.subdomains)))
         self.console.print(table)
 
-    def print_subdomains(self, domain: str, subdomains: Set[str]) -> None:
+    def print_subdomains(self, domain: str, subdomains: set[str]) -> None:
         tree = Tree(f"[bold blue]{domain}[/] ({len(subdomains)} subdominios)")
         for sub in sorted(subdomains):
             tree.add(sub)
         self.console.print(tree)
 
-    def print_header_findings(self, reports: Dict[str, List[HeaderReport]]) -> None:
+    def print_header_findings(self, reports: dict[str, list[HeaderReport]]) -> None:
         if not reports:
             self.console.print("[yellow]Sin datos públicos de cabeceras para los hosts analizados.[/]")
             return
@@ -97,7 +94,6 @@ class Reporter:
     def print_asm_results(self, asm: ASMResult) -> None:
         """Muestra resultados del módulo ASM en consola con formato Rich."""
         from rich.rule import Rule
-        from rich.panel import Panel as RichPanel
 
         self.console.print(Rule("[bold red]ASM — Análisis de Superficie de Ataque[/]"))
 
@@ -236,7 +232,7 @@ class Reporter:
 
         if result.all_vulns:
             self.console.print(
-                f"\n  [bold red]CVEs indexados por Shodan:[/] "
+                "\n  [bold red]CVEs indexados por Shodan:[/] "
                 + ", ".join(result.all_vulns[:15])
                 + (" …" if len(result.all_vulns) > 15 else "")
             )
@@ -244,17 +240,17 @@ class Reporter:
             danger = sorted(p for p in result.all_ports if p in PUERTOS_PELIGROSOS)
             if danger:
                 self.console.print(
-                    f"  [bold yellow]⚠ Puertos de alto riesgo expuestos:[/] "
+                    "  [bold yellow]⚠ Puertos de alto riesgo expuestos:[/] "
                     + ", ".join(str(p) for p in danger)
                 )
 
     def to_json(
         self,
         domain: str,
-        subdomains: Set[str],
-        source_results: List[SourceResult],
-        header_reports: Dict[str, List[HeaderReport]],
-        asm: Optional["ASMResult"] = None,
+        subdomains: set[str],
+        source_results: list[SourceResult],
+        header_reports: dict[str, list[HeaderReport]],
+        asm: ASMResult | None = None,
         shodan=None,
     ) -> str:
         payload = {
@@ -321,10 +317,10 @@ class Reporter:
     def to_html(
         self,
         domain: str,
-        subdomains: Set[str],
-        source_results: List[SourceResult],
-        header_reports: Dict[str, List[HeaderReport]],
-        asm: Optional["ASMResult"] = None,
+        subdomains: set[str],
+        source_results: list[SourceResult],
+        header_reports: dict[str, list[HeaderReport]],
+        asm: ASMResult | None = None,
         shodan=None,
     ) -> str:
         severity_color = {

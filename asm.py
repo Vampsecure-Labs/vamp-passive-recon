@@ -46,13 +46,11 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, Set
 from urllib.parse import quote_plus
 
 import aiohttp
 
 from sources import DEFAULT_TIMEOUT, USER_AGENT
-
 
 # ────────────────────────────────────────────────────────────────────────────
 # Constantes
@@ -63,7 +61,7 @@ URLSCAN_SEARCH    = "https://urlscan.io/api/v1/search/"
 CRTSH_API         = "https://crt.sh/"
 
 # Patrones de búsqueda de secretos en GitHub (se formatea con {domain})
-_GITHUB_DORKS: List[str] = [
+_GITHUB_DORKS: list[str] = [
     '"{domain}" filename:.env',
     '"{domain}" filename:config.php password',
     '"{domain}" filename:wp-config.php',
@@ -76,53 +74,53 @@ _GITHUB_DORKS: List[str] = [
 
 # Patrones regex para detección de tecnologías en cabeceras HTTP
 # Formato: { nombre_cabecera: [(regex, nombre_tech, confianza), ...] }
-_HEADER_TECH_PATTERNS: Dict[str, List[tuple]] = {
+_HEADER_TECH_PATTERNS: dict[str, list[tuple]] = {
     "Server": [
-        (re.compile(r"Apache(?:[/\s](\S+))?", re.I),       "Apache HTTP",         "HIGH"),
-        (re.compile(r"nginx(?:[/\s](\S+))?", re.I),         "nginx",               "HIGH"),
-        (re.compile(r"Microsoft-IIS(?:[/\s](\S+))?", re.I), "Microsoft IIS",       "HIGH"),
-        (re.compile(r"LiteSpeed(?:[/\s](\S+))?", re.I),     "LiteSpeed",           "MEDIUM"),
-        (re.compile(r"cloudflare", re.I),                    "Cloudflare",          "HIGH"),
-        (re.compile(r"openresty", re.I),                     "OpenResty",           "MEDIUM"),
-        (re.compile(r"Caddy(?:[/\s](\S+))?", re.I),         "Caddy",               "HIGH"),
-        (re.compile(r"Kestrel", re.I),                       "ASP.NET Core/Kestrel","MEDIUM"),
+        (re.compile(r"Apache(?:[/\s](\S+))?", re.IGNORECASE),       "Apache HTTP",         "HIGH"),
+        (re.compile(r"nginx(?:[/\s](\S+))?", re.IGNORECASE),         "nginx",               "HIGH"),
+        (re.compile(r"Microsoft-IIS(?:[/\s](\S+))?", re.IGNORECASE), "Microsoft IIS",       "HIGH"),
+        (re.compile(r"LiteSpeed(?:[/\s](\S+))?", re.IGNORECASE),     "LiteSpeed",           "MEDIUM"),
+        (re.compile(r"cloudflare", re.IGNORECASE),                    "Cloudflare",          "HIGH"),
+        (re.compile(r"openresty", re.IGNORECASE),                     "OpenResty",           "MEDIUM"),
+        (re.compile(r"Caddy(?:[/\s](\S+))?", re.IGNORECASE),         "Caddy",               "HIGH"),
+        (re.compile(r"Kestrel", re.IGNORECASE),                       "ASP.NET Core/Kestrel","MEDIUM"),
     ],
     "X-Powered-By": [
-        (re.compile(r"PHP(?:[/\s](\S+))?", re.I),           "PHP",                 "HIGH"),
-        (re.compile(r"ASP\.NET(?:[/\s](\S+))?", re.I),      "ASP.NET",             "HIGH"),
-        (re.compile(r"Express", re.I),                       "Express.js",          "MEDIUM"),
-        (re.compile(r"Next\.js", re.I),                      "Next.js",             "HIGH"),
-        (re.compile(r"Phusion Passenger(?:[/\s](\S+))?", re.I), "Phusion Passenger","MEDIUM"),
+        (re.compile(r"PHP(?:[/\s](\S+))?", re.IGNORECASE),           "PHP",                 "HIGH"),
+        (re.compile(r"ASP\.NET(?:[/\s](\S+))?", re.IGNORECASE),      "ASP.NET",             "HIGH"),
+        (re.compile(r"Express", re.IGNORECASE),                       "Express.js",          "MEDIUM"),
+        (re.compile(r"Next\.js", re.IGNORECASE),                      "Next.js",             "HIGH"),
+        (re.compile(r"Phusion Passenger(?:[/\s](\S+))?", re.IGNORECASE), "Phusion Passenger","MEDIUM"),
     ],
     "X-Generator": [
-        (re.compile(r"WordPress(?:\s+(\S+))?", re.I),        "WordPress",           "HIGH"),
-        (re.compile(r"Drupal(?:\s+(\S+))?", re.I),           "Drupal",              "HIGH"),
-        (re.compile(r"Joomla(?:\s+(\S+))?", re.I),           "Joomla",              "HIGH"),
-        (re.compile(r"Wix", re.I),                           "Wix",                 "HIGH"),
-        (re.compile(r"Ghost(?:\s+(\S+))?", re.I),            "Ghost CMS",           "HIGH"),
+        (re.compile(r"WordPress(?:\s+(\S+))?", re.IGNORECASE),        "WordPress",           "HIGH"),
+        (re.compile(r"Drupal(?:\s+(\S+))?", re.IGNORECASE),           "Drupal",              "HIGH"),
+        (re.compile(r"Joomla(?:\s+(\S+))?", re.IGNORECASE),           "Joomla",              "HIGH"),
+        (re.compile(r"Wix", re.IGNORECASE),                           "Wix",                 "HIGH"),
+        (re.compile(r"Ghost(?:\s+(\S+))?", re.IGNORECASE),            "Ghost CMS",           "HIGH"),
     ],
     "Via": [
-        (re.compile(r"Varnish", re.I),                       "Varnish Cache",       "HIGH"),
-        (re.compile(r"squid", re.I),                         "Squid Proxy",         "MEDIUM"),
+        (re.compile(r"Varnish", re.IGNORECASE),                       "Varnish Cache",       "HIGH"),
+        (re.compile(r"squid", re.IGNORECASE),                         "Squid Proxy",         "MEDIUM"),
     ],
-    "X-Drupal-Cache":     [(re.compile(r".", re.I),          "Drupal",              "HIGH")],
-    "X-Shopify-Stage":    [(re.compile(r".", re.I),          "Shopify",             "HIGH")],
-    "X-Wix-Request-Id":   [(re.compile(r".", re.I),          "Wix",                 "HIGH")],
-    "X-WordPress-Cache":  [(re.compile(r".", re.I),          "WordPress",           "HIGH")],
-    "X-Joomla-CMS":       [(re.compile(r".", re.I),          "Joomla",              "HIGH")],
-    "CF-Cache-Status":    [(re.compile(r".", re.I),          "Cloudflare",          "HIGH")],
-    "X-Amz-Cf-Id":        [(re.compile(r".", re.I),          "AWS CloudFront",      "HIGH")],
-    "X-Amzn-Trace-Id":    [(re.compile(r".", re.I),          "AWS",                 "MEDIUM")],
-    "X-Vercel-Id":        [(re.compile(r".", re.I),          "Vercel",              "HIGH")],
-    "X-Netlify-Id":       [(re.compile(r".", re.I),          "Netlify",             "HIGH")],
-    "X-Fastly-Request-ID":[(re.compile(r".", re.I),          "Fastly CDN",          "HIGH")],
+    "X-Drupal-Cache":     [(re.compile(r".", re.IGNORECASE),          "Drupal",              "HIGH")],
+    "X-Shopify-Stage":    [(re.compile(r".", re.IGNORECASE),          "Shopify",             "HIGH")],
+    "X-Wix-Request-Id":   [(re.compile(r".", re.IGNORECASE),          "Wix",                 "HIGH")],
+    "X-WordPress-Cache":  [(re.compile(r".", re.IGNORECASE),          "WordPress",           "HIGH")],
+    "X-Joomla-CMS":       [(re.compile(r".", re.IGNORECASE),          "Joomla",              "HIGH")],
+    "CF-Cache-Status":    [(re.compile(r".", re.IGNORECASE),          "Cloudflare",          "HIGH")],
+    "X-Amz-Cf-Id":        [(re.compile(r".", re.IGNORECASE),          "AWS CloudFront",      "HIGH")],
+    "X-Amzn-Trace-Id":    [(re.compile(r".", re.IGNORECASE),          "AWS",                 "MEDIUM")],
+    "X-Vercel-Id":        [(re.compile(r".", re.IGNORECASE),          "Vercel",              "HIGH")],
+    "X-Netlify-Id":       [(re.compile(r".", re.IGNORECASE),          "Netlify",             "HIGH")],
+    "X-Fastly-Request-ID":[(re.compile(r".", re.IGNORECASE),          "Fastly CDN",          "HIGH")],
 }
 
 # Emisores de certificados que se consideran "estándar" (no merecen alertar)
 _COMMON_ISSUERS_RE = re.compile(
     r"Let's Encrypt|DigiCert|GlobalSign|Comodo|Sectigo|GeoTrust"
     r"|GoDaddy|Amazon|Google Trust Services|ZeroSSL|Entrust|Symantec",
-    re.I,
+    re.IGNORECASE,
 )
 
 
@@ -166,11 +164,11 @@ class TechEntry:
 class ASMResult:
     """Resultado consolidado del análisis ASM."""
     domain: str
-    tech_stack: List[TechEntry] = field(default_factory=list)
-    cert_history: List[CertHistoryEntry] = field(default_factory=list)
-    github_findings: List[GitHubFinding] = field(default_factory=list)
+    tech_stack: list[TechEntry] = field(default_factory=list)
+    cert_history: list[CertHistoryEntry] = field(default_factory=list)
+    github_findings: list[GitHubFinding] = field(default_factory=list)
     github_enabled: bool = False
-    errors: List[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -185,13 +183,13 @@ class ASMAnalyzer:
       · Análisis de historial de certificados (crt.sh)
     """
 
-    def __init__(self, github_token: Optional[str] = None):
+    def __init__(self, github_token: str | None = None):
         self._github_token = github_token or os.environ.get("GITHUB_TOKEN")
 
     async def analyze(
         self,
         domain: str,
-        header_data: Dict[str, dict],
+        header_data: dict[str, dict],
     ) -> ASMResult:
         """
         Ejecuta el análisis ASM completo.
@@ -257,14 +255,14 @@ class ASMAnalyzer:
         self,
         session: aiohttp.ClientSession,
         domain: str,
-    ) -> List[TechEntry]:
+    ) -> list[TechEntry]:
         """
         Consulta urlscan.io para extraer el stack tecnológico detectado en
         escaneos públicos previos del dominio. El campo 'technologies' de
         urlscan incluye nombre, versión y categoría de cada tecnología.
         """
         url = f"{URLSCAN_SEARCH}?q=domain%3A{quote_plus(domain)}&size=5"
-        tech_seen: Dict[str, TechEntry] = {}
+        tech_seen: dict[str, TechEntry] = {}
 
         try:
             async with session.get(url, timeout=DEFAULT_TIMEOUT) as r:
@@ -292,15 +290,15 @@ class ASMAnalyzer:
 
     def _fingerprint_headers(
         self,
-        header_data: Dict[str, dict],
-    ) -> List[TechEntry]:
+        header_data: dict[str, dict],
+    ) -> list[TechEntry]:
         """
         Analiza las cabeceras HTTP ya capturadas para detectar tecnologías
         mediante patrones regex definidos en _HEADER_TECH_PATTERNS.
         """
-        tech_seen: Dict[str, TechEntry] = {}
+        tech_seen: dict[str, TechEntry] = {}
 
-        for _host, headers in header_data.items():
+        for headers in header_data.values():
             for header_name, patterns in _HEADER_TECH_PATTERNS.items():
                 # Búsqueda case-insensitive de la cabecera
                 header_val = ""
@@ -331,7 +329,7 @@ class ASMAnalyzer:
         self,
         session: aiohttp.ClientSession,
         domain: str,
-    ) -> List[CertHistoryEntry]:
+    ) -> list[CertHistoryEntry]:
         """
         Consulta crt.sh para obtener el historial completo de certificados TLS
         emitidos para el dominio. Analiza:
@@ -342,8 +340,8 @@ class ASMAnalyzer:
         Devuelve los 30 certificados más recientes.
         """
         url = f"{CRTSH_API}?q=%25.{quote_plus(domain)}&output=json"
-        entries: List[CertHistoryEntry] = []
-        seen_ids: Set[str] = set()
+        entries: list[CertHistoryEntry] = []
+        seen_ids: set[str] = set()
         now = datetime.utcnow()
 
         try:
@@ -404,7 +402,7 @@ class ASMAnalyzer:
         self,
         session: aiohttp.ClientSession,
         domain: str,
-    ) -> List[GitHubFinding]:
+    ) -> list[GitHubFinding]:
         """
         Busca posible exposición de material sensible en repositorios GitHub
         públicos mediante patrones de búsqueda (dorks) predefinidos.
@@ -416,7 +414,7 @@ class ASMAnalyzer:
         if not self._github_token:
             return []
 
-        findings: List[GitHubFinding] = []
+        findings: list[GitHubFinding] = []
         auth_headers = {
             "Authorization": f"Bearer {self._github_token}",
             "Accept": "application/vnd.github.v3.text-match+json",
