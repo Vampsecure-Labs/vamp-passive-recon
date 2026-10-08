@@ -173,6 +173,91 @@ python vamp_passive_recon.py -d example.com \
 
 ---
 
+## Sample Output
+
+```bash
+$ python vamp_passive_recon.py -d example.com \
+    --allowed-domains example.com,api.example.com \
+    --shodan-key YOUR_KEY \
+    --json recon.json --html report.html
+```
+
+```
+╭──────────────────────────────────────────────────────────────────────────────╮
+│  vamp-passive-recon v1.2.0 · VampSecure Labs Security Research Division      │
+│  Target: example.com  ·  Shodan: enabled  ·  Concurrencia: 5                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+Fase 1 — Enumeración de subdominios
+  Consultando: crt.sh, OTX, HackerTarget, Wayback, AnubisDB, urlscan.io, RapidDNS, BufferOver
+  ✓ 47 subdominios descubiertos, 38 únicos tras deduplicación
+
+Fase 2 — ASM (Attack Surface Mapping)
+  → Certificate Transparency: 12 certificados analizados, 3 dominios adicionales
+  → GitHub dorks: 1 resultado relevante — posible fichero .env expuesto en repo público
+  → Infraestructura expuesta: 2 hosts con banner de servicio interno
+
+Fase 3 — Auditoría de headers HTTP (15 hosts activos)
+  ✓ 15 hosts auditados
+  ⚠ CSP ausente:              9/15 hosts
+  ⚠ HSTS ausente:             4/15 hosts
+  ⚠ X-Frame-Options ausente: 11/15 hosts
+  ⚠ Server header expuesto:   7/15 hosts (nginx/1.18.0)
+
+Fase 4 — Enriquecimiento Shodan
+  → 8 hosts con datos Shodan
+  → 3 CVEs correlacionadas en hosts activos
+
+╭──────────────────────────────── Hallazgos ASM ──────────────────────────────╮
+│ Tipo          │ Sev.     │ Descripción                                       │
+│ GitHub dork   │ 🔴 HIGH  │ Repo público con posible fichero .env             │
+│ Banner leak   │ 🟠 MED   │ 2 hosts exponen banner de servicio interno        │
+│ CVE correlada │ 🟠 MED   │ CVE-2021-44228 detectada en 192.168.1.10        │
+│ Header audit  │ 🔵 LOW   │ CSP ausente en 9/15 hosts de example.com         │
+╰─────────────────────────────────────────────────────────────────────────────╯
+
+Subdominios exportados → recon.json
+Informe HTML         → report.html
+Total: 47 subdominios · 4 findings · 3 CVEs correlacionadas
+```
+
+---
+
+## Why vamp-passive-recon vs. SpiderFoot · theHarvester · Maltego
+
+| Capacidad | vamp-passive-recon | SpiderFoot | theHarvester | Maltego |
+|---|---|---|---|---|
+| 8 fuentes OSINT concurrentes | ✅ | ✅ (módulos) | ✅ | ✅ |
+| Auditoría de headers HTTP por host | ✅ | ❌ | ❌ | ❌ |
+| ASM + GitHub dorks integrados | ✅ | ✅ | ❌ | ✅ |
+| Correlación Shodan → CVE | ✅ | ✅ | ❌ | ✅ |
+| Export de subdominios para pipelines | ✅ | ✅ | ✅ | ❌ |
+| JSON / HTML CI/CD ready | ✅ | ✅ | ✅ | ❌ |
+| Self-hosted, sin licencia comercial | ✅ | ✅ | ✅ | ❌ (comercial) |
+| Integración directa con VSL tools | ✅ | ❌ | ❌ | ❌ |
+
+- Combina enumeración pasiva y auditoría activa de headers en un único paso: no se necesitan herramientas adicionales para obtener la postura HTTP de los hosts descubiertos.
+- El export `--subs-out` permite encadenar directamente con `vamp-subdomain-takeover` sin pasos manuales intermedios.
+- La correlación Shodan → CVE añade contexto de riesgo real sobre los hosts activos, sin enviar tráfico al target durante la fase de enumeración.
+- Integrado de forma nativa con `vamp-orchestrator`: los findings RECON-NNN se agregan automáticamente al informe unificado del engagement.
+
+---
+
+## Check Coverage
+
+| Área | Fuentes / Checks | Fase |
+|---|---|---|
+| Enumeración de subdominios | crt.sh, OTX, HackerTarget, Wayback, AnubisDB, urlscan.io, RapidDNS, BufferOver | Fase 1 |
+| Certificate Transparency | CT logs profundos, dominios adicionales, certificados wildcard | Fase 2 ASM |
+| GitHub exposure | Dorks: `.env`, `api_key`, `password`, `secret` en repositorios públicos | Fase 2 ASM |
+| Infraestructura expuesta | Banners de servicios internos, paneles de administración, staging accesible | Fase 2 ASM |
+| HTTP security headers | CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Permissions-Policy | Fase 3 |
+| Server information leakage | Cabeceras Server / X-Powered-By con versión de software expuesta | Fase 3 |
+| Cookie security flags | Ausencia de atributos Secure, HttpOnly y SameSite | Fase 3 |
+| Shodan CVE correlation | Port scan, banners de servicio, CVEs por versión en hosts activos | Fase 4 (opcional) |
+
+---
+
 ## Part of VampSecure Labs Toolkit
 
 `vamp-passive-recon` is part of the **VampSecure Labs Security Research Toolkit** — a collection of professional-grade, self-hosted security assessment tools.
