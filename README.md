@@ -1,6 +1,6 @@
 <!-- © VampSecure Studios — VampSecure Labs Security Research Division -->
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.2.1-crimson?style=flat-square" />
+  <img src="https://img.shields.io/badge/version-1.3.0-crimson?style=flat-square" />
   <img src="https://img.shields.io/badge/python-3.11+-blue?style=flat-square&logo=python&logoColor=white" />
   <img src="https://img.shields.io/badge/async-aiohttp-teal?style=flat-square" />
   <img src="https://img.shields.io/badge/VampSecure_Labs-Security_Research-8b0000?style=flat-square" />
@@ -186,7 +186,7 @@ $ python vamp_passive_recon.py -d example.com \
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│  vamp-passive-recon v1.2.1 · VampSecure Labs Security Research Division      │
+│  vamp-passive-recon v1.3.0 · VampSecure Labs Security Research Division      │
 │  Target: example.com  ·  Shodan: enabled  ·  Concurrency: 5                 │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 
@@ -279,6 +279,7 @@ Total: 47 subdomains · 4 findings · 3 CVEs correlated
 
 | Version | Main changes |
 |---------|-------------|
+| v1.3.0 | Modularisation to importable Python package (lib+cli) |
 | v1.2.1 | Bilingual README (EN/ES) |
 | v1.2.0 | VampSecure Labs Security Research Division — initial public release |
 
@@ -506,6 +507,7 @@ python vamp_passive_recon.py -d example.com \
 
 | Versión | Cambios principales |
 |---------|---------------------|
+| v1.3.0 | Modularización a paquete Python instalable (lib+cli) |
 | v1.2.1 | README bilingüe (EN/ES) |
 | v1.2.0 | VampSecure Labs Security Research Division — versión inicial pública |
 
